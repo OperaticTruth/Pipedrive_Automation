@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run get_deals.py in venv",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/get_deals.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/venv/Lib/site-packages"
+      }
+    }
+  ]
+}
