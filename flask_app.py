@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request
 from workflows.loan_amount_sync import loan_amount_sync
 from workflows.first_payment_date import calculate_first_payment_date
