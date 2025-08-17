@@ -1,13 +1,17 @@
 from config import BUY_SIDES_KEY, BUY_VOLUME_KEY, AVERAGE_BUY_VOLUME_KEY
-from workflows.utils import update_deal_custom_field
+from workflows.utils import update_person_custom_field
 
 def calculate_average_buy_volume(payload):
     data = payload.get('data', {})
     prev = payload.get('previous', {})
     meta = payload.get('meta', {})
-    deal_id = data.get('id')
+    person_id = data.get('id')
     
-    if not deal_id or meta.get('change_source') == 'api':
+    print(f"[DEBUG] Processing person {person_id}")
+    print(f"[DEBUG] All custom fields: {list(data.get('custom_fields', {}).keys())}")
+    print(f"[DEBUG] Looking for fields: {BUY_SIDES_KEY}, {BUY_VOLUME_KEY}")
+    
+    if not person_id or meta.get('change_source') == 'api':
         return
 
     # Check if any relevant field changed
@@ -84,5 +88,5 @@ def calculate_average_buy_volume(payload):
         except:
             pass
     
-    print(f"[→] Average buy volume → ${average_buy_volume:,.2f} for Deal {deal_id}")
-    update_deal_custom_field(deal_id, AVERAGE_BUY_VOLUME_KEY, average_buy_volume)
+    print(f"[→] Average buy volume → ${average_buy_volume:,.2f} for Person {person_id}")
+    update_person_custom_field(person_id, AVERAGE_BUY_VOLUME_KEY, average_buy_volume)

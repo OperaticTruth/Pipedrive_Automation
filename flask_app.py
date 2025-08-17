@@ -21,14 +21,14 @@ def handle_changed_deal():
     calculate_210_days(pl)
     calculate_commission(pl)
     comprehensive_stage_labels(pl)
-    calculate_average_buy_volume(pl)
     return '', 200
 
 @app.route('/webhook/changeperson', methods=['POST'])
 def handle_changed_person():
     pl = request.get_json()
     extract_birth_month(pl)
-    return '', 200 
+    calculate_average_buy_volume(pl)
+    return '', 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
