@@ -7,6 +7,7 @@ from workflows.commission import calculate_commission
 from workflows.comprehensive_stage_labels import comprehensive_stage_labels
 from workflows.loan_number_extract import extract_loan_number
 from workflows.birth_month_extract import extract_birth_month
+from workflows.average_buy_volume import calculate_average_buy_volume
 
 app = Flask(__name__)
 
@@ -20,6 +21,7 @@ def handle_changed_deal():
     calculate_210_days(pl)
     calculate_commission(pl)
     comprehensive_stage_labels(pl)
+    calculate_average_buy_volume(pl)
     return '', 200
 
 @app.route('/webhook/changeperson', methods=['POST'])
