@@ -9,6 +9,7 @@ from config import (
     IN_PROCESS_STAGE_ID,
     CLEAR_TO_CLOSE_STAGE_ID,
     WON_STATUS,
+    LOST_STATUS,
 )
 
 BASE_URL = "https://api.pipedrive.com/v1"
@@ -45,6 +46,8 @@ def determine_stage_label(stage_id, status):
     """
     if status == WON_STATUS:
         return "Closed Client"
+    elif status == LOST_STATUS:
+        return "REMOVE_ALL_EXCEPT_CLOSED"  # Special value to indicate remove all except "Closed Client"
     elif stage_id == APPLICATION_IN_STAGE_ID:
         return "Application In"
     elif stage_id == PREAPPROVED_STAGE_ID:
@@ -63,7 +66,15 @@ def apply_labels_to_person(person_id, new_label, preserve_closed_client=False):
     
     current_labels = get_person_labels(person_id)
     
-    if preserve_closed_client and "Closed Client" in current_labels:
+    if new_label == "REMOVE_ALL_EXCEPT_CLOSED":
+        # Remove all labels except "Closed Client" if it exists
+        if "Closed Client" in current_labels:
+            final_labels = ["Closed Client"]
+            print(f"[→] Person {person_id}: Lost deal - removing all labels except 'Closed Client'")
+        else:
+            final_labels = []
+            print(f"[→] Person {person_id}: Lost deal - removing all labels")
+    elif preserve_closed_client and "Closed Client" in current_labels:
         # Keep "Closed Client" and add the new label
         if new_label not in current_labels:
             final_labels = ["Closed Client", new_label]

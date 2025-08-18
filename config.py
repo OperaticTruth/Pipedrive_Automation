@@ -34,3 +34,4 @@ IN_PROCESS_STAGE_ID=int(os.getenv("IN_PROCESS_STAGE_ID", "0"))
 CLEAR_TO_CLOSE_STAGE_ID=int(os.getenv("CLEAR_TO_CLOSE_STAGE_ID", "0"))
 # status
 WON_STATUS=os.getenv("WON_STATUS")
+LOST_STATUS=os.getenv("LOST_STATUS")

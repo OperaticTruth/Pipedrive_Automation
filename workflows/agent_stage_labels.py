@@ -8,6 +8,7 @@ from config import (
     IN_PROCESS_STAGE_ID,
     CLEAR_TO_CLOSE_STAGE_ID,
     WON_STATUS,
+    LOST_STATUS,
 )
 
 BASE_URL = "https://api.pipedrive.com/v1"
@@ -44,12 +45,14 @@ def determine_agent_stage_label(stage_id, status):
     """
     if status == WON_STATUS:
         return None  # Will remove "In Process" label
+    elif status == LOST_STATUS:
+        return None # Will remove all labels except "Closed Client"
     elif stage_id in [GETTING_THINGS_ROLLING_STAGE_ID, IN_PROCESS_STAGE_ID, CLEAR_TO_CLOSE_STAGE_ID]:
         return "In Process"
     else:
         return None
 
-def apply_labels_to_agent(person_id, new_label, preserve_closed_client=False):
+def apply_labels_to_agent(person_id, new_label, preserve_closed_client=False, is_lost_deal=False):
     """
     Apply new labels to an agent, optionally preserving 'Closed Client'.
     """
@@ -59,13 +62,22 @@ def apply_labels_to_agent(person_id, new_label, preserve_closed_client=False):
     current_labels = get_person_labels(person_id)
     
     if new_label is None:
-        # Remove "In Process" label but preserve "Closed Client"
-        if "In Process" in current_labels:
-            final_labels = [lbl for lbl in current_labels if lbl != "In Process"]
-            print(f"[→] Agent {person_id}: Removing 'In Process' label, preserving other labels")
+        if is_lost_deal:
+            # Lost deal: remove all labels except "Closed Client"
+            if "Closed Client" in current_labels:
+                final_labels = ["Closed Client"]
+                print(f"[→] Agent {person_id}: Lost deal - removing all labels except 'Closed Client'")
+            else:
+                final_labels = []
+                print(f"[→] Agent {person_id}: Lost deal - removing all labels")
         else:
-            print(f"[✓] Agent {person_id}: No 'In Process' label to remove")
-            return
+            # Won deal: Remove "In Process" label but preserve "Closed Client"
+            if "In Process" in current_labels:
+                final_labels = [lbl for lbl in current_labels if lbl != "In Process"]
+                print(f"[→] Agent {person_id}: Removing 'In Process' label, preserving other labels")
+            else:
+                print(f"[✓] Agent {person_id}: No 'In Process' label to remove")
+                return
     elif preserve_closed_client and "Closed Client" in current_labels:
         # Keep "Closed Client" and add the new label
         if new_label not in current_labels:
@@ -136,14 +148,17 @@ def agent_stage_labels(payload):
     # Determine if we should preserve "Closed Client"
     preserve_closed_client = (new_label != "Closed Client")
     
+    # Determine if this is a lost deal
+    is_lost_deal = (new_label is None and current_status == LOST_STATUS)
+
     # Apply labels to buyer agent
     if buyer_agent_id:
         print(f"[→] Processing buyer agent {buyer_agent_id}")
-        apply_labels_to_agent(buyer_agent_id, new_label, preserve_closed_client)
+        apply_labels_to_agent(buyer_agent_id, new_label, preserve_closed_client, is_lost_deal)
     
     # Apply labels to listing agent
     if listing_agent_id:
         print(f"[→] Processing listing agent {listing_agent_id}")
-        apply_labels_to_agent(listing_agent_id, new_label, preserve_closed_client)
+        apply_labels_to_agent(listing_agent_id, new_label, preserve_closed_client, is_lost_deal)
     
     print(f"[✓] Completed agent label updates for Deal {deal_id}")
