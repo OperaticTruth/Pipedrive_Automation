@@ -126,8 +126,8 @@ def calculate_commission(payload):
     else:
         # Base rate calculation
         if is_self_sourced:
-            base_rate = 0.008  # 80bps
-            print(f"[→] Self-sourced is Yes, base rate = 80bps")
+            base_rate = 0.009  # 90bps
+            print(f"[→] Self-sourced is Yes, base rate = 90bps")
         else:
             base_rate = 0.004  # 40bps
             print(f"[→] Self-sourced is No, base rate = 40bps")
@@ -143,9 +143,9 @@ def calculate_commission(payload):
         
         # Apply caps
         if is_self_sourced and not is_branch_pricing:
-            cap = 7619.05
+            cap = 8000
         elif is_self_sourced and is_branch_pricing:
-            cap = 3809.52
+            cap = 4000
         elif not is_self_sourced and not is_branch_pricing:
             cap = 3200
         elif not is_self_sourced and is_branch_pricing:
