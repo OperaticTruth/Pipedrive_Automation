@@ -66,14 +66,21 @@ def sync_initial():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/webhook/salesforce/cdc', methods=['POST'])
+@app.route('/webhook/salesforce/cdc', methods=['POST', 'GET'])
 def handle_salesforce_cdc():
     """
     Handle Change Data Capture events from Salesforce.
     
     This endpoint receives real-time updates from Salesforce when
     Loan records are created or updated.
+    
+    GET requests are used by Salesforce for webhook verification/challenge.
     """
+    if request.method == 'GET':
+        # Salesforce CDC may send GET requests for verification/challenge
+        # Return 200 OK to acknowledge
+        return jsonify({"status": "ok", "message": "CDC webhook endpoint is active"}), 200
+    
     try:
         event_data = request.get_json()
         result = handle_cdc_event(event_data)

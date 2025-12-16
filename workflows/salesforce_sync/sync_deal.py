@@ -961,7 +961,8 @@ def update_deal(deal_id: int, loan_data: Dict, person_id: Optional[int], salesfo
     title = format_deal_title(loan_data)
     
     # Get loan amount
-    total_amount = loan_data.get("Total_Loan_Amount__c")
+    # Total Loan Amount is now: MtgPlanner_CRM__Loan_Amount_1st_TD__c
+    total_amount = loan_data.get("MtgPlanner_CRM__Loan_Amount_1st_TD__c")
     
     # Get status
     status = loan_data.get("MtgPlanner_CRM__Status__c", "")
@@ -1130,6 +1131,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     # before the sync ran, so it won't have the Salesforce Loan ID yet
     loan_number = loan_data.get("MtgPlanner_CRM__Loan_1st_TD__c")
     if loan_number:
+        logger.info(f"Checking for existing deal by Loan Number {loan_number} for Person {person_id}")
         existing_deal_by_loan_number = find_deal_by_loan_number(loan_number, person_id)
         
         if existing_deal_by_loan_number:

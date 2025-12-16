@@ -45,6 +45,7 @@ def handle_cdc_event(event_data: Dict[str, Any]) -> dict:
     # }
     
     try:
+        logger.info(f"Received CDC event: {event_data}")
         # Extract payload
         payload = event_data.get("data", {}).get("payload", {})
         if not payload:
