@@ -1,4 +1,5 @@
 import os
+import xml.etree.ElementTree as ET
 from flask import Flask, request, jsonify
 from workflows.loan_amount_sync import loan_amount_sync
 from workflows.first_payment_date import calculate_first_payment_date
@@ -12,6 +13,8 @@ from workflows.agent_stage_labels import agent_stage_labels
 
 # Salesforce sync imports
 from workflows.salesforce_sync import run_polling_sync, handle_cdc_event, run_initial_sync
+from workflows.salesforce_sync.salesforce_client import SalesforceClient
+from workflows.salesforce_sync.sync_deal import sync_deal_from_loan
 
 app = Flask(__name__)
 
@@ -87,6 +90,91 @@ def handle_salesforce_cdc():
         return jsonify(result), 200 if result.get('success') else 500
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/webhook/salesforce/outbound', methods=['POST'])
+def handle_salesforce_outbound():
+    """
+    Handle Salesforce Outbound Messages (SOAP/XML format).
+    
+    This endpoint receives SOAP XML messages from Salesforce Workflow
+    Outbound Messages when Loan records are created or updated.
+    """
+    try:
+        # Parse SOAP XML
+        xml_data = request.data
+        root = ET.fromstring(xml_data)
+        
+        # Extract namespace (Salesforce SOAP uses namespaces)
+        namespaces = {
+            'soapenv': 'http://schemas.xmlsoap.org/soap/envelope/',
+            'notifications': 'http://soap.sforce.com/2005/09/outbound'
+        }
+        
+        # Find the notification body
+        body = root.find('.//soapenv:Body', namespaces)
+        if body is None:
+            # Try without namespace
+            body = root.find('.//Body')
+        
+        if body is None:
+            return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
+        
+        # Find notifications element
+        notifications = body.find('.//notifications:notifications', namespaces)
+        if notifications is None:
+            # Try without namespace
+            notifications = body.find('.//notifications')
+        
+        if notifications is None:
+            return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
+        
+        # Extract Loan ID from the notification
+        # The structure is: <notifications:Notification><sObject><Id>a0X...</Id></sObject></notifications:Notification>
+        notification = notifications.find('.//notifications:Notification', namespaces)
+        if notification is None:
+            notification = notifications.find('.//Notification')
+        
+        if notification is None:
+            return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
+        
+        s_object = notification.find('.//sObject', namespaces)
+        if s_object is None:
+            s_object = notification.find('.//sObject')
+        
+        if s_object is None:
+            return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
+        
+        loan_id_elem = s_object.find('.//Id', namespaces)
+        if loan_id_elem is None:
+            loan_id_elem = s_object.find('.//Id')
+        
+        if loan_id_elem is None or loan_id_elem.text is None:
+            return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
+        
+        loan_id = loan_id_elem.text
+        
+        # Fetch the full loan record from Salesforce
+        sf_client = SalesforceClient()
+        loan = sf_client.get_loan_by_id(loan_id)
+        
+        if not loan:
+            return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
+        
+        # Sync the loan to Pipedrive
+        deal_id = sync_deal_from_loan(loan)
+        
+        if deal_id:
+            # Return success SOAP response
+            return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>true</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
+        else:
+            return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
+            
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error processing outbound message: {e}", exc_info=True)
+        # Return error SOAP response
+        return '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>', 200
 
 @app.route('/health', methods=['GET'])
 def health_check():
