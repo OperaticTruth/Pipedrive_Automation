@@ -139,35 +139,68 @@ def handle_salesforce_outbound():
             return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
         
         # Extract Loan ID from the notification
-        # The structure is: <notifications:Notification><sObject><Id>a0X...</Id></sObject></notifications:Notification>
+        # Try multiple ways to find the Id field
+        loan_id = None
+        
+        # Method 1: Look for Notification > sObject > Id
         notification = notifications.find('.//notifications:Notification', namespaces)
         if notification is None:
             notification = notifications.find('.//Notification')
         
-        if notification is None:
-            logger.error("Could not find Notification element")
+        if notification is not None:
+            logger.debug(f"Found notification element: {ET.tostring(notification, encoding='unicode')[:200]}")
+            
+            # Try to find sObject
+            s_object = notification.find('.//sObject', namespaces)
+            if s_object is None:
+                s_object = notification.find('.//sObject')
+            if s_object is None:
+                # Maybe sObject is directly in notification with namespace
+                for prefix, uri in namespaces.items():
+                    s_object = notification.find(f'.//{{{uri}}}sObject')
+                    if s_object is not None:
+                        break
+            
+            if s_object is not None:
+                logger.debug(f"Found sObject element: {ET.tostring(s_object, encoding='unicode')[:200]}")
+                loan_id_elem = s_object.find('.//Id', namespaces)
+                if loan_id_elem is None:
+                    loan_id_elem = s_object.find('.//Id')
+                if loan_id_elem is None:
+                    # Try with namespace
+                    for prefix, uri in namespaces.items():
+                        loan_id_elem = s_object.find(f'.//{{{uri}}}Id')
+                        if loan_id_elem is not None:
+                            break
+                
+                if loan_id_elem is not None and loan_id_elem.text:
+                    loan_id = loan_id_elem.text
+                    logger.info(f"Found Loan ID via sObject: {loan_id}")
+        
+        # Method 2: Search for Id anywhere in the notification
+        if not loan_id and notification is not None:
+            # Search for any Id element in notification
+            for elem in notification.iter():
+                if elem.tag.endswith('Id') or elem.tag == 'Id':
+                    if elem.text and elem.text.startswith('a0'):
+                        loan_id = elem.text
+                        logger.info(f"Found Loan ID via direct search: {loan_id}")
+                        break
+        
+        # Method 3: Search entire body for Id
+        if not loan_id:
+            for elem in body.iter():
+                if elem.tag.endswith('Id') or elem.tag == 'Id':
+                    if elem.text and elem.text.startswith('a0'):
+                        loan_id = elem.text
+                        logger.info(f"Found Loan ID via body search: {loan_id}")
+                        break
+        
+        if not loan_id:
+            logger.error("Could not find Loan ID in XML. Full XML structure:")
+            logger.error(ET.tostring(root, encoding='unicode')[:2000])
             soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
             return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        
-        s_object = notification.find('.//sObject', namespaces)
-        if s_object is None:
-            s_object = notification.find('.//sObject')
-        
-        if s_object is None:
-            logger.error("Could not find sObject element")
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-            return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        
-        loan_id_elem = s_object.find('.//Id', namespaces)
-        if loan_id_elem is None:
-            loan_id_elem = s_object.find('.//Id')
-        
-        if loan_id_elem is None or loan_id_elem.text is None:
-            logger.error("Could not find Id element or Id is empty")
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-            return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        
-        loan_id = loan_id_elem.text
         logger.info(f"Extracted Loan ID: {loan_id}")
         
         # Fetch the full loan record from Salesforce
