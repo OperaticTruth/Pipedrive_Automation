@@ -105,9 +105,6 @@ def handle_salesforce_outbound():
     try:
         # Parse SOAP XML
         xml_data = request.data
-        logger.info(f"Received outbound message. Content-Type: {request.content_type}, Data length: {len(xml_data)}")
-        logger.debug(f"Raw XML data: {xml_data.decode('utf-8')[:500]}")  # Log first 500 chars
-        
         root = ET.fromstring(xml_data)
         
         # Extract namespace (Salesforce SOAP uses namespaces)
@@ -148,8 +145,6 @@ def handle_salesforce_outbound():
             notification = notifications.find('.//Notification')
         
         if notification is not None:
-            logger.debug(f"Found notification element: {ET.tostring(notification, encoding='unicode')[:200]}")
-            
             # Try to find sObject
             s_object = notification.find('.//sObject', namespaces)
             if s_object is None:
@@ -162,7 +157,6 @@ def handle_salesforce_outbound():
                         break
             
             if s_object is not None:
-                logger.debug(f"Found sObject element: {ET.tostring(s_object, encoding='unicode')[:200]}")
                 loan_id_elem = s_object.find('.//Id', namespaces)
                 if loan_id_elem is None:
                     loan_id_elem = s_object.find('.//Id')
@@ -175,7 +169,6 @@ def handle_salesforce_outbound():
                 
                 if loan_id_elem is not None and loan_id_elem.text:
                     loan_id = loan_id_elem.text
-                    logger.info(f"Found Loan ID via sObject: {loan_id}")
         
         # Method 2: Search for Id anywhere in the notification
         if not loan_id and notification is not None:
@@ -184,7 +177,6 @@ def handle_salesforce_outbound():
                 if elem.tag.endswith('Id') or elem.tag == 'Id':
                     if elem.text and elem.text.startswith('a0'):
                         loan_id = elem.text
-                        logger.info(f"Found Loan ID via direct search: {loan_id}")
                         break
         
         # Method 3: Search entire body for Id
@@ -193,15 +185,12 @@ def handle_salesforce_outbound():
                 if elem.tag.endswith('Id') or elem.tag == 'Id':
                     if elem.text and elem.text.startswith('a0'):
                         loan_id = elem.text
-                        logger.info(f"Found Loan ID via body search: {loan_id}")
                         break
         
         if not loan_id:
-            logger.error("Could not find Loan ID in XML. Full XML structure:")
-            logger.error(ET.tostring(root, encoding='unicode')[:2000])
+            logger.error("Could not find Loan ID in XML")
             soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
             return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        logger.info(f"Extracted Loan ID: {loan_id}")
         
         # Fetch the full loan record from Salesforce
         sf_client = SalesforceClient()
@@ -212,23 +201,21 @@ def handle_salesforce_outbound():
             soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
             return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
         
-        logger.info(f"Fetched loan {loan_id}, syncing to Pipedrive...")
         # Sync the loan to Pipedrive
         deal_id = sync_deal_from_loan(loan)
         
         if deal_id:
-            logger.info(f"Successfully synced Loan {loan_id} to Deal {deal_id}")
+            logger.info(f"Synced Loan {loan_id} to Deal {deal_id}")
             # Return success SOAP response with correct Content-Type
             soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>true</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
             return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
         else:
-            logger.warning(f"Sync returned None for Loan {loan_id}")
+            logger.warning(f"Sync failed for Loan {loan_id}")
             soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
             return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
             
     except ET.ParseError as e:
         logger.error(f"XML parsing error: {e}")
-        logger.error(f"XML data: {request.data.decode('utf-8', errors='ignore')[:1000]}")
         # Return error SOAP response
         soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
         return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
