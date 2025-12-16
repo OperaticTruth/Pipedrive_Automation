@@ -1,6 +1,135 @@
-from config import COMMISSION_KEY, SELF_SOURCED_KEY, BRANCH_PRICING_KEY, COMPANY_LEAD_KEY, LOAN_AMOUNT_KEY
+from config import COMMISSION_KEY, SELF_SOURCED_KEY, BRANCH_PRICING_KEY, COMPANY_LEAD_KEY, LOAN_AMOUNT_KEY, PIPEDRIVE_API_KEY
 from workflows.utils import update_deal_custom_field
 import pprint
+import requests
+from typing import Optional
+
+BASE_URL = "https://api.pipedrive.com/v1"
+
+
+def calculate_commission_for_deal(deal_id: int) -> Optional[float]:
+    """
+    Calculate commission for a deal by fetching current deal data.
+    This can be called directly from sync code.
+    
+    Args:
+        deal_id: Pipedrive Deal ID
+        
+    Returns:
+        Calculated commission amount or None
+    """
+    # Fetch current deal data with custom fields
+    # Pipedrive API requires custom fields to be requested explicitly
+    url = f"{BASE_URL}/deals/{deal_id}"
+    params = {
+        "api_token": PIPEDRIVE_API_KEY
+    }
+    
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        result = resp.json()
+        
+        if not result.get("success"):
+            return None
+        
+        data = result.get("data", {})
+        
+        # Pipedrive API returns custom fields at the root level of data, not under "custom_fields"
+        # So we can access them directly from data
+        custom_fields = data  # Use data directly since custom fields are at root level
+        
+        # Get the amount to calculate commission on
+        # Try Loan Amount custom field first, then fall back to value
+        loan_amount_field = data.get(LOAN_AMOUNT_KEY) if LOAN_AMOUNT_KEY else None
+        if loan_amount_field:
+            if isinstance(loan_amount_field, dict):
+                amount = loan_amount_field.get("value", 0) or 0
+            else:
+                amount = loan_amount_field or 0
+        else:
+            amount = data.get("value", 0) or 0
+        
+        print(f"[COMMISSION DEBUG] Amount: {amount}, Value field: {data.get('value')}, Loan Amount field: {loan_amount_field}")
+        
+        # Parse self-sourced (ID 91 = Yes)
+        # Custom fields are at root level, and option IDs are returned directly as integers
+        ss_field = data.get(SELF_SOURCED_KEY)
+        print(f"[COMMISSION DEBUG] Self Sourced field: {ss_field}, SELF_SOURCED_KEY: {SELF_SOURCED_KEY}")
+        if isinstance(ss_field, dict):
+            self_sourced_id = ss_field.get("id") or ss_field.get("value")
+        else:
+            # Value is the option ID directly (91 = Yes)
+            self_sourced_id = ss_field
+        # Compare as integers (handle string "91" vs int 91)
+        is_self_sourced = (int(self_sourced_id) == 91) if self_sourced_id is not None else False
+        print(f"[COMMISSION DEBUG] Self Sourced ID: {self_sourced_id}, Is Self Sourced: {is_self_sourced}")
+        
+        # Parse branch pricing (ID 137 = Yes)
+        # Custom fields are at root level
+        bp_field = data.get(BRANCH_PRICING_KEY)
+        print(f"[COMMISSION DEBUG] Branch Pricing field: {bp_field}, BRANCH_PRICING_KEY: {BRANCH_PRICING_KEY}")
+        if isinstance(bp_field, dict):
+            branch_pricing_id = bp_field.get("id") or bp_field.get("value")
+        else:
+            # Value is the option ID directly (137 = Yes, None = No)
+            branch_pricing_id = bp_field
+        # Compare as integers (handle string "137" vs int 137)
+        is_branch_pricing = (int(branch_pricing_id) == 137) if branch_pricing_id is not None else False
+        print(f"[COMMISSION DEBUG] Branch Pricing ID: {branch_pricing_id}, Is Branch Pricing: {is_branch_pricing}")
+        
+        # Parse company lead (ID 139 = Yes)
+        # Custom fields are at root level
+        cl_field = data.get(COMPANY_LEAD_KEY)
+        if isinstance(cl_field, dict):
+            company_lead_id = cl_field.get("id") or cl_field.get("value")
+        else:
+            # Value is the option ID directly (139 = Yes, None = No)
+            company_lead_id = cl_field
+        # Compare as integers (handle string "139" vs int 139)
+        is_company_lead = (int(company_lead_id) == 139) if company_lead_id is not None else False
+        
+        # Calculate commission based on rules
+        if is_company_lead:
+            commission = 250
+        else:
+            # Base rate calculation
+            if is_self_sourced and is_branch_pricing:
+                # Self-sourced AND branch pricing = 40bps (not 45bps)
+                base_rate = 0.004  # 40bps
+            elif is_self_sourced:
+                base_rate = 0.009  # 90bps
+            elif is_branch_pricing:
+                base_rate = 0.002  # 20bps (40bps / 2)
+            else:
+                base_rate = 0.004  # 40bps
+            
+            # Calculate commission
+            commission = round(amount * base_rate, 2)
+            
+            # Apply caps
+            if is_self_sourced and not is_branch_pricing:
+                cap = 8000
+            elif is_self_sourced and is_branch_pricing:
+                cap = 4000
+            elif not is_self_sourced and not is_branch_pricing:
+                cap = 3200
+            elif not is_self_sourced and is_branch_pricing:
+                cap = 1600
+            else:
+                cap = float('inf')
+            
+            if commission > cap:
+                commission = cap
+        
+        # Update commission field
+        update_deal_custom_field(deal_id, COMMISSION_KEY, commission)
+        return commission
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to calculate commission for Deal {deal_id}: {e}")
+        return None
+
 
 def calculate_commission(payload):
     data = payload.get('data', {})
@@ -125,17 +254,19 @@ def calculate_commission(payload):
         print(f"[→] Company lead is Yes, commission = $250")
     else:
         # Base rate calculation
-        if is_self_sourced:
+        if is_self_sourced and is_branch_pricing:
+            # Self-sourced AND branch pricing = 40bps (not 45bps)
+            base_rate = 0.004  # 40bps
+            print(f"[→] Self-sourced is Yes AND Branch pricing is Yes, base rate = 40bps")
+        elif is_self_sourced:
             base_rate = 0.009  # 90bps
             print(f"[→] Self-sourced is Yes, base rate = 90bps")
+        elif is_branch_pricing:
+            base_rate = 0.002  # 20bps (40bps / 2)
+            print(f"[→] Self-sourced is No AND Branch pricing is Yes, base rate = 20bps")
         else:
             base_rate = 0.004  # 40bps
             print(f"[→] Self-sourced is No, base rate = 40bps")
-        
-        # Apply branch pricing reduction
-        if is_branch_pricing:
-            base_rate = base_rate / 2  # Cut in half
-            print(f"[→] Branch pricing is Yes, rate reduced to {base_rate*100}bps")
         
         # Calculate commission
         commission = round(amount * base_rate, 2)
