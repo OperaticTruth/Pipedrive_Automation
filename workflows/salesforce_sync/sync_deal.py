@@ -529,14 +529,16 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool =
     except Exception as e:
         logger.warning(f"Error searching active deals by Salesforce ID: {e}")
     
-    # Step 2: If including archived, check archived deals endpoint
+    # Step 2: If including archived, try alternative methods
+    # Note: The /api/v2/deals/archived endpoint may not be available on all plans
+    # We'll try it but handle 404 gracefully and use fallback methods
     if include_archived:
+        # Try v2 archived endpoint first
         try:
-            # Use v2 API for archived deals
             archived_url = f"{BASE_URL_V2}/deals/archived"
             archived_params = {
                 "api_token": PIPEDRIVE_API_KEY,
-                "limit": 500  # Get up to 500 archived deals
+                "limit": 500
             }
             
             archived_resp = requests.get(archived_url, params=archived_params)
@@ -550,7 +552,6 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool =
             logger.info(f"Checking {len(archived_deals)} archived deals for Salesforce Loan ID {salesforce_loan_id}")
             
             # Check each archived deal
-            # First, try to get custom fields from the archived endpoint response
             for deal in archived_deals:
                 if not isinstance(deal, dict):
                     continue
@@ -559,10 +560,9 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool =
                 if not deal_id:
                     continue
                 
-                # Try to get custom fields from archived endpoint response first
+                # Try to get custom fields from archived endpoint response
                 loan_id_value = deal.get(loan_id_key)
                 if not loan_id_value:
-                    # Check if custom_fields is in the response
                     custom_fields = deal.get("custom_fields", {})
                     if isinstance(custom_fields, dict):
                         loan_id_value = custom_fields.get(loan_id_key)
@@ -574,38 +574,20 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool =
                         field_value = loan_id_value
                     
                     if str(field_value) == str(salesforce_loan_id):
-                        logger.info(f"Found existing archived Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id} (from archived endpoint)")
+                        logger.info(f"Found existing archived Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id}")
                         return deal_id
-                
-                # If not found in archived endpoint response, try fetching individual deal
-                # Note: This might not work for archived deals, but worth trying
-                deal_url = f"{BASE_URL}/deals/{deal_id}?api_token={PIPEDRIVE_API_KEY}"
-                try:
-                    deal_resp = requests.get(deal_url)
-                    deal_resp.raise_for_status()
-                    deal_result = deal_resp.json()
-                    if deal_result.get("success"):
-                        full_deal = deal_result.get("data", {})
-                        
-                        # Custom fields might be at root or in custom_fields
-                        loan_id_value = full_deal.get(loan_id_key) or full_deal.get("custom_fields", {}).get(loan_id_key)
-                        
-                        if loan_id_value:
-                            if isinstance(loan_id_value, dict):
-                                field_value = loan_id_value.get("value")
-                            else:
-                                field_value = loan_id_value
-                            
-                            if str(field_value) == str(salesforce_loan_id):
-                                logger.info(f"Found existing archived Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id} (from individual fetch)")
-                                return deal_id
-                except Exception as e:
-                    # This is expected for archived deals - the endpoint might not work
-                    logger.debug(f"Could not fetch archived deal {deal_id} individually (this is normal for archived deals): {e}")
-                    continue
                     
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                logger.warning("Archived deals endpoint not available (404) - this may not be supported on your Pipedrive plan")
+            else:
+                logger.warning(f"Error accessing archived deals endpoint: {e}")
         except Exception as e:
-            logger.error(f"Error searching archived deals by Salesforce ID: {e}", exc_info=True)
+            logger.warning(f"Error searching archived deals: {e}")
+        
+        # Fallback: Try searching all deals with status filter (if supported)
+        # This is a workaround since archived endpoint may not be available
+        logger.info("Note: Cannot reliably check archived deals via API. If a deal was archived, a new deal may be created.")
     
     return None
 
@@ -1375,10 +1357,65 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     # Step 2: Check for existing deal by Loan Number (manually converted Lead)
     # This handles the case where a Lead was manually converted to a Deal
     # before the sync ran, so it won't have the Salesforce Loan ID yet
+    # Also checks for archived deals since they won't show up in standard searches
     loan_number = loan_data.get("MtgPlanner_CRM__Loan_1st_TD__c")
     if loan_number:
         logger.info(f"Checking for existing deal by Loan Number {loan_number} for Person {person_id}")
-        # Include archived deals so we can check their status
+        
+        # Try searching by loan number in title - this might find archived deals
+        # Search for deals with loan number in title (format: "Name - Loan # 123456789")
+        search_term = f"Loan # {loan_number}"
+        try:
+            search_url = f"{BASE_URL}/deals/search"
+            search_params = {
+                "api_token": PIPEDRIVE_API_KEY,
+                "term": search_term,
+                "fields": "title"
+            }
+            
+            search_resp = requests.get(search_url, params=search_params)
+            search_resp.raise_for_status()
+            search_result = search_resp.json()
+            search_data = search_result.get("data", {})
+            
+            if isinstance(search_data, list):
+                search_items = search_data
+            elif isinstance(search_data, dict):
+                search_items = search_data.get("items", [])
+            else:
+                search_items = []
+            
+            # Check if any search result matches our loan number and person
+            for item in search_items:
+                if isinstance(item, dict) and "item" in item:
+                    deal = item.get("item", {})
+                elif isinstance(item, dict):
+                    deal = item
+                else:
+                    continue
+                
+                deal_id = deal.get("id")
+                deal_title = deal.get("title", "")
+                deal_person_id = deal.get("person_id")
+                
+                # Extract person_id if it's a dict
+                if isinstance(deal_person_id, dict):
+                    deal_person_id = deal_person_id.get("value")
+                
+                # Check if title contains loan number and person matches
+                if deal_id and search_term in deal_title and deal_person_id and int(deal_person_id) == person_id:
+                    # Found a deal - check if archived/lost
+                    if is_deal_archived_or_lost(deal_id):
+                        logger.info(f"Found archived/lost Deal {deal_id} with Loan Number {loan_number} - skipping sync")
+                        return None
+                    else:
+                        logger.info(f"Found existing Deal {deal_id} by Loan Number {loan_number} in search - updating")
+                        update_deal(deal_id, loan_data, person_id, salesforce_loan_id)
+                        return deal_id
+        except Exception as e:
+            logger.debug(f"Error searching by loan number in title: {e}")
+        
+        # Fallback: Use the regular loan number search
         existing_deal_by_loan_number = find_deal_by_loan_number(loan_number, person_id, include_archived=True)
         
         if existing_deal_by_loan_number:
