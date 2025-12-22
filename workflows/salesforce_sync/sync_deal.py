@@ -668,14 +668,26 @@ def find_deal_by_loan_number(loan_number: str, person_id: int, include_archived:
             
             loan_number_field = custom_fields.get(LOAN_NUMBER_KEY)
             
+            logger.error(f"  Deal {deal_id}: loan_number_field = {loan_number_field}")
+            
             # Check custom field first
             if loan_number_field:
                 field_value = loan_number_field.get("value") if isinstance(loan_number_field, dict) else loan_number_field
+                logger.error(f"  Deal {deal_id}: Extracted field_value = '{field_value}' (type: {type(field_value)})")
+                logger.error(f"  Deal {deal_id}: Comparing '{field_value}' == '{loan_number}' (type: {type(loan_number)})")
                 if str(field_value) == str(loan_number):
+                    logger.error(f"  ✓ MATCH! Deal {deal_id} has matching loan number")
                     # Check if archived/lost if we're not including archived
                     if include_archived or not is_deal_archived_or_lost(deal_id):
+                        logger.error(f"  ✓ Deal {deal_id} is active - RETURNING IT")
                         logger.info(f"Found existing Deal {deal_id} with Loan Number {loan_number} for Person {person_id}")
                         return deal_id
+                    else:
+                        logger.error(f"  ✗ Deal {deal_id} is archived/lost - skipping")
+                else:
+                    logger.error(f"  ✗ NO MATCH: '{field_value}' != '{loan_number}'")
+            else:
+                logger.error(f"  Deal {deal_id}: No loan_number_field found in custom_fields")
             
             # Fallback: Check deal title for loan number (format: "Name - Loan # 123456789")
             deal_title = full_deal.get("title", "")
