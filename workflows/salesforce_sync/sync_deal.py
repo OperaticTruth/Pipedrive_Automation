@@ -1536,14 +1536,28 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                             # Store mapping first
                             store_deal_mapping(salesforce_loan_id, deal_id)
                             
-                            # Check if archived/lost
-                            if is_deal_archived_or_lost(deal_id):
-                                logger.info(f"Deal {deal_id} is archived or lost - skipping sync (mapping stored)")
-                                return None
-                            else:
+                            # Check if archived/lost by fetching the deal first
+                            # We need to fetch it to check the active status
+                            try:
+                                check_url = f"{BASE_URL}/deals/{deal_id}?api_token={PIPEDRIVE_API_KEY}"
+                                check_resp = requests.get(check_url)
+                                check_resp.raise_for_status()
+                                check_result = check_resp.json()
+                                
+                                if check_result.get("success"):
+                                    check_deal = check_result.get("data", {})
+                                    if check_deal.get("active") == False or check_deal.get("status") == "lost":
+                                        logger.error(f"✗ Deal {deal_id} is archived or lost - skipping sync (mapping stored)")
+                                        return None
+                                
                                 logger.error(f"✓ Deal {deal_id} is active - UPDATING IT")
                                 update_deal(deal_id, loan_data, person_id, salesforce_loan_id)
                                 return deal_id
+                            except requests.exceptions.HTTPError as e:
+                                if e.response.status_code == 404:
+                                    logger.error(f"✗ Deal {deal_id} not found (404 - likely archived) - skipping sync")
+                                    return None
+                                raise
         except Exception as e:
             logger.warning(f"Error searching by loan number: {e}")
         
