@@ -1282,6 +1282,12 @@ def update_deal(deal_id: int, loan_data: Dict, person_id: Optional[int], salesfo
             error_body = resp.text
             logger.error(f"Failed to update Deal {deal_id}: {resp.status_code} {resp.reason}")
             logger.error(f"Error response: {error_body}")
+            
+            # Check if deal is archived (Pipedrive returns 400 with "Entity is archived" message)
+            if resp.status_code == 400 and "archived" in error_body.lower():
+                logger.info(f"Deal {deal_id} is archived - cannot update. Skipping sync.")
+                return False  # Return False to indicate we handled it (don't create duplicate)
+            
             logger.error(f"Update data sent: {list(update_data.keys())}")
             # Log problematic fields that might cause issues
             for key, value in update_data.items():
