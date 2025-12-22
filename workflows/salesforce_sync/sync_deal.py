@@ -659,14 +659,15 @@ def find_deal_by_loan_number(loan_number: str, person_id: int, include_archived:
                 deal_result = deal_resp.json()
                 if deal_result.get("success"):
                     full_deal = deal_result.get("data", {})
+                    # Pipedrive API returns custom fields at root level, not under "custom_fields"
+                    # Check both locations to be safe
                     custom_fields = full_deal.get("custom_fields", {})
+                    loan_number_field = custom_fields.get(LOAN_NUMBER_KEY) or full_deal.get(LOAN_NUMBER_KEY)
                 else:
                     continue
             except Exception as e:
                 logger.warning(f"Failed to fetch deal {deal_id}: {e}")
                 continue
-            
-            loan_number_field = custom_fields.get(LOAN_NUMBER_KEY)
             
             logger.error(f"  Deal {deal_id}: loan_number_field = {loan_number_field}")
             
