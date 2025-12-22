@@ -1263,7 +1263,21 @@ def update_deal(deal_id: int, loan_data: Dict, person_id: Optional[int], salesfo
     
     try:
         resp = requests.put(url, json=update_data)
-        resp.raise_for_status()
+        
+        # Check for errors before parsing JSON
+        if resp.status_code != 200:
+            error_body = resp.text
+            logger.error(f"Failed to update Deal {deal_id}: {resp.status_code} {resp.reason}")
+            logger.error(f"Error response: {error_body}")
+            logger.error(f"Update data sent: {list(update_data.keys())}")
+            # Log problematic fields that might cause issues
+            for key, value in update_data.items():
+                if value is None:
+                    logger.debug(f"  {key}: None (might cause issues)")
+                elif isinstance(value, (dict, list)) and len(str(value)) > 200:
+                    logger.debug(f"  {key}: {type(value).__name__} (length: {len(str(value))})")
+            resp.raise_for_status()
+        
         result = resp.json()
         
         if result.get("success"):
