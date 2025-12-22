@@ -1414,6 +1414,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
             logger.warning(f"Error checking mapped deal {mapped_deal_id}: {e}")
     else:
         logger.error(f"No stored mapping found for Salesforce Loan ID {salesforce_loan_id}")
+        from .deal_mapping import MAPPING_FILE
         logger.error(f"Mapping file location: {MAPPING_FILE}")
         logger.error(f"Mapping file exists: {MAPPING_FILE.exists() if hasattr(MAPPING_FILE, 'exists') else 'unknown'}")
     
