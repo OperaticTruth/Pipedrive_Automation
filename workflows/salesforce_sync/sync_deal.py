@@ -1489,17 +1489,25 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
             logger.error(f"Search API returned {len(search_items)} results for loan number {loan_number}")
             
             # Check each search result for matching loan number in custom field
-            for item in search_items:
+            for idx, item in enumerate(search_items):
+                logger.error(f"  Processing search result {idx + 1}/{len(search_items)}")
+                
                 if isinstance(item, dict) and "item" in item:
                     deal = item.get("item", {})
+                    logger.error(f"  Item has 'item' key, extracted deal")
                 elif isinstance(item, dict):
                     deal = item
+                    logger.error(f"  Item is dict, using as deal")
                 else:
+                    logger.error(f"  Item is not a dict, skipping")
                     continue
                 
                 deal_id = deal.get("id")
                 if not deal_id:
+                    logger.error(f"  Deal has no ID, skipping")
                     continue
+                
+                logger.error(f"  Checking Deal {deal_id}")
                 
                 deal_person_id = deal.get("person_id")
                 if isinstance(deal_person_id, dict):
@@ -1508,7 +1516,9 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                 # Check loan number custom field FIRST (loan number is unique identifier)
                 # We'll verify person match after, but loan number takes priority
                 if LOAN_NUMBER_KEY:
+                    logger.error(f"  Looking for loan number field: {LOAN_NUMBER_KEY}")
                     loan_number_field = deal.get(LOAN_NUMBER_KEY)
+                    logger.error(f"  Deal {deal_id}: loan_number_field = {loan_number_field}")
                     if loan_number_field:
                         if isinstance(loan_number_field, dict):
                             field_value = loan_number_field.get("value")
