@@ -368,6 +368,9 @@ def is_deal_archived_or_lost(deal_id: int) -> bool:
     """
     Check if a deal is archived or has status = lost.
     
+    Note: If a deal is archived, the standard /deals/{id} endpoint might not work.
+    We check the active field and status field.
+    
     Args:
         deal_id: Pipedrive Deal ID
         
@@ -382,23 +385,71 @@ def is_deal_archived_or_lost(deal_id: int) -> bool:
         result = resp.json()
         
         if not result.get("success"):
-            return False
+            # If the endpoint fails, it might be archived - check archived endpoint
+            logger.debug(f"Standard endpoint failed for deal {deal_id}, checking if archived")
+            return _check_if_deal_is_archived(deal_id)
         
         deal = result.get("data", {})
         
         # Check if archived
         if deal.get("active") == False:
+            logger.debug(f"Deal {deal_id} is archived (active=False)")
             return True
         
         # Check if status is lost
         status = deal.get("status")
         if status == "lost":
+            logger.debug(f"Deal {deal_id} is lost (status=lost)")
             return True
         
         return False
         
+    except requests.exceptions.HTTPError as e:
+        # If we get a 404 or other error, the deal might be archived
+        if e.response.status_code == 404:
+            logger.debug(f"Deal {deal_id} not found via standard endpoint (404) - checking archived")
+            return _check_if_deal_is_archived(deal_id)
+        logger.warning(f"Error checking deal {deal_id} status: {e}")
+        return False
     except Exception as e:
         logger.warning(f"Error checking deal {deal_id} status: {e}")
+        return False
+
+
+def _check_if_deal_is_archived(deal_id: int) -> bool:
+    """
+    Check if a deal is in the archived deals list.
+    
+    Args:
+        deal_id: Pipedrive Deal ID
+        
+    Returns:
+        True if deal is found in archived list, False otherwise
+    """
+    try:
+        archived_url = f"{BASE_URL_V2}/deals/archived"
+        archived_params = {
+            "api_token": PIPEDRIVE_API_KEY,
+            "limit": 500
+        }
+        
+        archived_resp = requests.get(archived_url, params=archived_params)
+        archived_resp.raise_for_status()
+        archived_result = archived_resp.json()
+        
+        archived_deals = archived_result.get("data", {}).get("items", [])
+        if not isinstance(archived_deals, list):
+            archived_deals = []
+        
+        # Check if this deal_id is in the archived list
+        for deal in archived_deals:
+            if isinstance(deal, dict) and deal.get("id") == deal_id:
+                logger.debug(f"Deal {deal_id} found in archived deals list")
+                return True
+        
+        return False
+    except Exception as e:
+        logger.warning(f"Error checking if deal {deal_id} is archived: {e}")
         return False
 
 
@@ -496,7 +547,10 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool =
             if not isinstance(archived_deals, list):
                 archived_deals = []
             
+            logger.info(f"Checking {len(archived_deals)} archived deals for Salesforce Loan ID {salesforce_loan_id}")
+            
             # Check each archived deal
+            # First, try to get custom fields from the archived endpoint response
             for deal in archived_deals:
                 if not isinstance(deal, dict):
                     continue
@@ -505,7 +559,26 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool =
                 if not deal_id:
                     continue
                 
-                # Fetch full deal to get custom fields (archived endpoint might not return them)
+                # Try to get custom fields from archived endpoint response first
+                loan_id_value = deal.get(loan_id_key)
+                if not loan_id_value:
+                    # Check if custom_fields is in the response
+                    custom_fields = deal.get("custom_fields", {})
+                    if isinstance(custom_fields, dict):
+                        loan_id_value = custom_fields.get(loan_id_key)
+                
+                if loan_id_value:
+                    if isinstance(loan_id_value, dict):
+                        field_value = loan_id_value.get("value")
+                    else:
+                        field_value = loan_id_value
+                    
+                    if str(field_value) == str(salesforce_loan_id):
+                        logger.info(f"Found existing archived Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id} (from archived endpoint)")
+                        return deal_id
+                
+                # If not found in archived endpoint response, try fetching individual deal
+                # Note: This might not work for archived deals, but worth trying
                 deal_url = f"{BASE_URL}/deals/{deal_id}?api_token={PIPEDRIVE_API_KEY}"
                 try:
                     deal_resp = requests.get(deal_url)
@@ -513,6 +586,7 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool =
                     deal_result = deal_resp.json()
                     if deal_result.get("success"):
                         full_deal = deal_result.get("data", {})
+                        
                         # Custom fields might be at root or in custom_fields
                         loan_id_value = full_deal.get(loan_id_key) or full_deal.get("custom_fields", {}).get(loan_id_key)
                         
@@ -523,14 +597,15 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool =
                                 field_value = loan_id_value
                             
                             if str(field_value) == str(salesforce_loan_id):
-                                logger.info(f"Found existing archived Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id}")
+                                logger.info(f"Found existing archived Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id} (from individual fetch)")
                                 return deal_id
                 except Exception as e:
-                    logger.debug(f"Error fetching archived deal {deal_id}: {e}")
+                    # This is expected for archived deals - the endpoint might not work
+                    logger.debug(f"Could not fetch archived deal {deal_id} individually (this is normal for archived deals): {e}")
                     continue
                     
         except Exception as e:
-            logger.warning(f"Error searching archived deals by Salesforce ID: {e}")
+            logger.error(f"Error searching archived deals by Salesforce ID: {e}", exc_info=True)
     
     return None
 
