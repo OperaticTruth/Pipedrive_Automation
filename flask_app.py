@@ -210,8 +210,11 @@ def handle_salesforce_outbound():
             soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>true</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
             return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
         else:
-            logger.warning(f"Sync failed for Loan {loan_id}")
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
+            # None is returned when sync is intentionally skipped (archived/lost/cancelled deals)
+            # This is expected behavior, not a failure
+            logger.info(f"Sync skipped for Loan {loan_id} (deal is archived, lost, or cancelled)")
+            # Still return success to Salesforce since we handled it correctly
+            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>true</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
             return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
             
     except ET.ParseError as e:
