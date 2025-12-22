@@ -639,7 +639,7 @@ def find_deal_by_loan_number(loan_number: str, person_id: int, include_archived:
         if not isinstance(deals, list):
             deals = []
         
-        logger.info(f"Checking {len(deals)} deals for person {person_id} with loan number {loan_number}")
+        logger.error(f"Checking {len(deals)} deals for person {person_id} with loan number {loan_number}")
         
         # Check each deal for matching loan number
         # Note: Need to fetch full deal to get custom fields (person deals endpoint doesn't return them)
@@ -1331,9 +1331,9 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
         logger.error("No Salesforce Loan ID found in loan data")
         return None
     
-    logger.info(f"=== STARTING SYNC for Loan {salesforce_loan_id} ===")
-    logger.info(f"Loan Status: {loan_data.get('MtgPlanner_CRM__Status__c', 'N/A')}")
-    logger.info(f"Loan Number: {loan_data.get('MtgPlanner_CRM__Loan_1st_TD__c', 'N/A')}")
+    logger.error(f"=== STARTING SYNC for Loan {salesforce_loan_id} ===")
+    logger.error(f"Loan Status: {loan_data.get('MtgPlanner_CRM__Status__c', 'N/A')}")
+    logger.error(f"Loan Number: {loan_data.get('MtgPlanner_CRM__Loan_1st_TD__c', 'N/A')}")
     
     # Check if status is Cancelled - don't sync per requirements
     status = loan_data.get("MtgPlanner_CRM__Status__c", "")
@@ -1355,7 +1355,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     
     # Step 0: Check stored mapping first (handles archived deals)
     # This is our workaround since archived deals can't be queried via API
-    logger.info(f"Checking stored mapping for Salesforce Loan ID {salesforce_loan_id}")
+    logger.error(f"Step 0: Checking stored mapping for Salesforce Loan ID {salesforce_loan_id}")
     mapped_deal_id = get_deal_id_for_loan(salesforce_loan_id)
     if mapped_deal_id:
         logger.info(f"Found Deal {mapped_deal_id} in stored mapping for Loan {salesforce_loan_id}")
@@ -1404,7 +1404,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     
     # Step 1: Check for existing deal by Salesforce Loan ID (already synced)
     # Include archived deals so we can check their status
-    logger.info(f"Step 1: Searching for deal by Salesforce Loan ID {salesforce_loan_id}")
+    logger.error(f"Step 1: Searching for deal by Salesforce Loan ID {salesforce_loan_id}")
     existing_deal_id = find_deal_by_salesforce_id(salesforce_loan_id, include_archived=True)
     
     if existing_deal_id:
@@ -1442,7 +1442,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     # Also checks for archived deals since they won't show up in standard searches
     loan_number = loan_data.get("MtgPlanner_CRM__Loan_1st_TD__c")
     if loan_number:
-        logger.info(f"Checking for existing deal by Loan Number {loan_number} for Person {person_id}")
+        logger.error(f"Step 2: Checking for existing deal by Loan Number {loan_number} for Person {person_id}")
         
         # Search by loan number value directly - this should search custom fields
         # The search API might include archived deals in results
