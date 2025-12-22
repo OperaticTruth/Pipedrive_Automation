@@ -1366,7 +1366,8 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                 deal = deal_result.get("data", {})
                 # Check if archived or lost
                 if deal.get("active") == False or deal.get("status") == "lost":
-                    logger.info(f"Deal {mapped_deal_id} from mapping is archived or lost - skipping sync")
+                    logger.info(f"Deal {mapped_deal_id} from mapping is archived or lost - skipping sync for Loan {salesforce_loan_id}")
+                    logger.info(f"SKIP: Deal {mapped_deal_id} is archived/lost - will NOT create duplicate")
                     return None
                 
                 # Deal exists and is active - update it
@@ -1387,7 +1388,8 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
         except requests.exceptions.HTTPError as e:
             # If we get 404, the deal is likely archived (can't be fetched)
             if e.response.status_code == 404:
-                logger.info(f"Deal {mapped_deal_id} from mapping not found (404 - likely archived) - skipping sync")
+                logger.info(f"Deal {mapped_deal_id} from mapping not found (404 - likely archived) - skipping sync for Loan {salesforce_loan_id}")
+                logger.info(f"SKIP: Deal {mapped_deal_id} is archived - will NOT create duplicate")
                 return None
             # Other errors - log but continue with normal search
             logger.warning(f"Error fetching deal {mapped_deal_id} from mapping: {e}")
