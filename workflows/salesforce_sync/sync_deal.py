@@ -364,12 +364,51 @@ def convert_lead_to_deal(lead_id: int, loan_data: Dict, person_id: int) -> Optio
         return None
 
 
-def find_deal_by_salesforce_id(salesforce_loan_id: str) -> Optional[int]:
+def is_deal_archived_or_lost(deal_id: int) -> bool:
+    """
+    Check if a deal is archived or has status = lost.
+    
+    Args:
+        deal_id: Pipedrive Deal ID
+        
+    Returns:
+        True if deal is archived or lost, False otherwise
+    """
+    url = f"{BASE_URL}/deals/{deal_id}?api_token={PIPEDRIVE_API_KEY}"
+    
+    try:
+        resp = requests.get(url)
+        resp.raise_for_status()
+        result = resp.json()
+        
+        if not result.get("success"):
+            return False
+        
+        deal = result.get("data", {})
+        
+        # Check if archived
+        if deal.get("active") == False:
+            return True
+        
+        # Check if status is lost
+        status = deal.get("status")
+        if status == "lost":
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logger.warning(f"Error checking deal {deal_id} status: {e}")
+        return False
+
+
+def find_deal_by_salesforce_id(salesforce_loan_id: str, include_archived: bool = True) -> Optional[int]:
     """
     Find a Pipedrive Deal by Salesforce Loan ID.
     
     Args:
         salesforce_loan_id: Salesforce Loan ID
+        include_archived: Whether to include archived deals in search
         
     Returns:
         Pipedrive Deal ID if found, None otherwise
@@ -431,8 +470,15 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str) -> Optional[int]:
                     field_value = loan_id_value
                     
                 if str(field_value) == str(salesforce_loan_id):
-                    logger.info(f"Found existing Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id}")
-                    return deal_id
+                    # If we're including archived, return it; otherwise check if it's archived
+                    if include_archived:
+                        logger.info(f"Found existing Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id}")
+                        return deal_id
+                    else:
+                        # Check if archived/lost - if so, don't return it
+                        if not is_deal_archived_or_lost(deal_id):
+                            logger.info(f"Found existing Deal {deal_id} with Salesforce Loan ID {salesforce_loan_id}")
+                            return deal_id
         
         return None
         
@@ -443,7 +489,7 @@ def find_deal_by_salesforce_id(salesforce_loan_id: str) -> Optional[int]:
         return None
 
 
-def find_deal_by_loan_number(loan_number: str, person_id: int) -> Optional[int]:
+def find_deal_by_loan_number(loan_number: str, person_id: int, include_archived: bool = True) -> Optional[int]:
     """
     Find a Pipedrive Deal by Loan Number and Person ID.
     
@@ -453,6 +499,7 @@ def find_deal_by_loan_number(loan_number: str, person_id: int) -> Optional[int]:
     Args:
         loan_number: Loan number from Salesforce
         person_id: Pipedrive Person ID to narrow the search
+        include_archived: Whether to include archived deals in search
         
     Returns:
         Pipedrive Deal ID if found, None otherwise
@@ -477,7 +524,7 @@ def find_deal_by_loan_number(loan_number: str, person_id: int) -> Optional[int]:
         if not result.get("success", True):
             logger.warning(f"Failed to get deals for person {person_id}: {result}")
             # Fall back to search method
-            return _find_deal_by_loan_number_search(loan_number, person_id)
+            return _find_deal_by_loan_number_search(loan_number, person_id, include_archived)
         
         deals = result.get("data")
         if deals is None:
@@ -518,28 +565,35 @@ def find_deal_by_loan_number(loan_number: str, person_id: int) -> Optional[int]:
             if loan_number_field:
                 field_value = loan_number_field.get("value") if isinstance(loan_number_field, dict) else loan_number_field
                 if str(field_value) == str(loan_number):
-                    logger.info(f"Found existing Deal {deal_id} with Loan Number {loan_number} for Person {person_id}")
-                    print(f"[DEBUG] Found existing Deal {deal_id} with Loan Number {loan_number} (custom field)")
-                    return deal_id
+                    # Check if archived/lost if we're not including archived
+                    if include_archived or not is_deal_archived_or_lost(deal_id):
+                        logger.info(f"Found existing Deal {deal_id} with Loan Number {loan_number} for Person {person_id}")
+                        return deal_id
             
             # Fallback: Check deal title for loan number (format: "Name - Loan # 123456789")
             deal_title = full_deal.get("title", "")
             if deal_title and f"Loan # {loan_number}" in deal_title:
-                logger.info(f"Found existing Deal {deal_id} by loan number in title '{deal_title}' for Person {person_id}")
-                print(f"[DEBUG] Found existing Deal {deal_id} by loan number in title '{deal_title}'")
-                return deal_id
+                # Check if archived/lost if we're not including archived
+                if include_archived or not is_deal_archived_or_lost(deal_id):
+                    logger.info(f"Found existing Deal {deal_id} by loan number in title '{deal_title}' for Person {person_id}")
+                    return deal_id
         
         logger.debug(f"No matching deal found for loan number {loan_number} and person {person_id}")
         return None
         
     except Exception as e:
         logger.warning(f"Error getting deals for person {person_id}: {e}, trying search method")
-        return _find_deal_by_loan_number_search(loan_number, person_id)
+        return _find_deal_by_loan_number_search(loan_number, person_id, include_archived)
 
 
-def _find_deal_by_loan_number_search(loan_number: str, person_id: int) -> Optional[int]:
+def _find_deal_by_loan_number_search(loan_number: str, person_id: int, include_archived: bool = True) -> Optional[int]:
     """
     Fallback method: Search for deals by loan number using search API.
+    
+    Args:
+        loan_number: Loan number from Salesforce
+        person_id: Pipedrive Person ID to narrow the search
+        include_archived: Whether to include archived deals in search
     """
     from config import LOAN_NUMBER_KEY
     
@@ -598,8 +652,13 @@ def _find_deal_by_loan_number_search(loan_number: str, person_id: int) -> Option
             if loan_number_field:
                 field_value = loan_number_field.get("value") if isinstance(loan_number_field, dict) else loan_number_field
                 if str(field_value) == str(loan_number):
-                    logger.info(f"Found existing Deal {deal_id} with Loan Number {loan_number} (search method)")
-                    return deal_id
+                    # Check if archived/lost if we're not including archived
+                    if include_archived or not is_deal_archived_or_lost(deal_id):
+                        logger.info(f"Found existing Deal {deal_id} with Loan Number {loan_number} (search method)")
+                        return deal_id
+                    else:
+                        logger.info(f"Found Deal {deal_id} with Loan Number {loan_number} but it's archived/lost - skipping")
+                        return None
         
         return None
         
@@ -1106,9 +1165,15 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     coborrower_person_id = sync_coborrower_from_loan(loan_data)
     
     # Step 1: Check for existing deal by Salesforce Loan ID (already synced)
-    existing_deal_id = find_deal_by_salesforce_id(salesforce_loan_id)
+    # Include archived deals so we can check their status
+    existing_deal_id = find_deal_by_salesforce_id(salesforce_loan_id, include_archived=True)
     
     if existing_deal_id:
+        # Check if deal is archived or lost - if so, skip syncing
+        if is_deal_archived_or_lost(existing_deal_id):
+            logger.info(f"Deal {existing_deal_id} is archived or lost - skipping sync")
+            return None
+        
         # Update existing deal
         update_deal(existing_deal_id, loan_data, person_id, salesforce_loan_id)
         
@@ -1132,9 +1197,15 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     loan_number = loan_data.get("MtgPlanner_CRM__Loan_1st_TD__c")
     if loan_number:
         logger.info(f"Checking for existing deal by Loan Number {loan_number} for Person {person_id}")
-        existing_deal_by_loan_number = find_deal_by_loan_number(loan_number, person_id)
+        # Include archived deals so we can check their status
+        existing_deal_by_loan_number = find_deal_by_loan_number(loan_number, person_id, include_archived=True)
         
         if existing_deal_by_loan_number:
+            # Check if deal is archived or lost - if so, skip syncing
+            if is_deal_archived_or_lost(existing_deal_by_loan_number):
+                logger.info(f"Deal {existing_deal_by_loan_number} is archived or lost - skipping sync")
+                return None
+            
             logger.info(f"Found existing Deal {existing_deal_by_loan_number} by Loan Number {loan_number} - updating with Salesforce data")
             # Update the deal with all Salesforce data (including Salesforce Loan ID)
             update_deal(existing_deal_by_loan_number, loan_data, person_id, salesforce_loan_id)
