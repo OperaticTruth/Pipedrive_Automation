@@ -1331,6 +1331,10 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
         logger.error("No Salesforce Loan ID found in loan data")
         return None
     
+    logger.info(f"=== STARTING SYNC for Loan {salesforce_loan_id} ===")
+    logger.info(f"Loan Status: {loan_data.get('MtgPlanner_CRM__Status__c', 'N/A')}")
+    logger.info(f"Loan Number: {loan_data.get('MtgPlanner_CRM__Loan_1st_TD__c', 'N/A')}")
+    
     # Check if status is Cancelled - don't sync per requirements
     status = loan_data.get("MtgPlanner_CRM__Status__c", "")
     if status == "Cancelled":
@@ -1400,9 +1404,11 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     
     # Step 1: Check for existing deal by Salesforce Loan ID (already synced)
     # Include archived deals so we can check their status
+    logger.info(f"Step 1: Searching for deal by Salesforce Loan ID {salesforce_loan_id}")
     existing_deal_id = find_deal_by_salesforce_id(salesforce_loan_id, include_archived=True)
     
     if existing_deal_id:
+        logger.info(f"Step 1: FOUND existing Deal {existing_deal_id} by Salesforce Loan ID")
         # Store the mapping for future reference
         store_deal_mapping(salesforce_loan_id, existing_deal_id)
         
@@ -1427,6 +1433,8 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                     logger.warning(f"Failed to update co-borrower: {e}")
         
         return existing_deal_id
+    else:
+        logger.info(f"Step 1: No deal found by Salesforce Loan ID")
     
     # Step 2: Check for existing deal by Loan Number (most reliable unique ID)
     # This handles the case where a Lead was manually converted to a Deal
@@ -1537,13 +1545,15 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                         logger.warning(f"Failed to update co-borrower: {e}")
             
             return existing_deal_by_loan_number
+        else:
+            logger.info(f"Step 2: No deal found by Loan Number {loan_number}")
     
     # Step 3: No existing deal found - check for active Lead to convert
+    logger.info(f"Step 3: Checking for active Lead for Person {person_id}")
     active_lead_id = find_active_lead_for_person(person_id)
     
     if active_lead_id:
-        # Convert Lead to Deal
-        logger.info(f"Found active Lead {active_lead_id} for Person {person_id} - converting to Deal")
+        logger.info(f"Step 3: Found active Lead {active_lead_id} - converting to Deal")
         deal_id = convert_lead_to_deal(active_lead_id, loan_data, person_id)
         
         if deal_id:
@@ -1566,9 +1576,14 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
             return deal_id
         else:
             logger.warning(f"Failed to convert Lead {active_lead_id} - will create new Deal instead")
+    else:
+        logger.info(f"Step 3: No active Lead found for Person {person_id}")
     
     # Step 4: No active lead found - create new deal
-    logger.info(f"No active Lead found for Person {person_id} - creating new Deal")
+    logger.warning(f"=== CREATING NEW DEAL for Loan {salesforce_loan_id} ===")
+    logger.warning(f"Reason: No existing deal found via mapping, Salesforce ID search, or loan number search")
+    logger.warning(f"Loan Number: {loan_data.get('MtgPlanner_CRM__Loan_1st_TD__c', 'N/A')}")
+    logger.warning(f"Person ID: {person_id}")
     deal_id = create_deal(loan_data, person_id, salesforce_loan_id)
     
     # Update co-borrower association if we have one
