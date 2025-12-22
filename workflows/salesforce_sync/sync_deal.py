@@ -1413,7 +1413,9 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
         except Exception as e:
             logger.warning(f"Error checking mapped deal {mapped_deal_id}: {e}")
     else:
-        logger.info(f"No stored mapping found for Salesforce Loan ID {salesforce_loan_id}")
+        logger.error(f"No stored mapping found for Salesforce Loan ID {salesforce_loan_id}")
+        logger.error(f"Mapping file location: {MAPPING_FILE}")
+        logger.error(f"Mapping file exists: {MAPPING_FILE.exists() if hasattr(MAPPING_FILE, 'exists') else 'unknown'}")
     
     # Step 1: Check for existing deal by Salesforce Loan ID (already synced)
     # Include archived deals so we can check their status
@@ -1453,12 +1455,14 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     # This handles the case where a Lead was manually converted to a Deal
     # before the sync ran, so it won't have the Salesforce Loan ID yet
     # Also checks for archived deals since they won't show up in standard searches
+    # IMPORTANT: Search ALL deals by loan number first (not just person's deals)
+    # This handles edge cases where person has multiple deals (e.g., as co-borrower)
     loan_number = loan_data.get("MtgPlanner_CRM__Loan_1st_TD__c")
     if loan_number:
-        logger.error(f"Step 2: Checking for existing deal by Loan Number {loan_number} for Person {person_id}")
+        logger.error(f"Step 2: Searching ALL deals by Loan Number {loan_number} (not just Person {person_id})")
         
-        # Search by loan number value directly - this should search custom fields
-        # The search API might include archived deals in results
+        # FIRST: Search by loan number across ALL deals (most reliable)
+        # This finds deals even if person has multiple deals or deal is archived
         try:
             from config import LOAN_NUMBER_KEY
             
@@ -1481,7 +1485,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
             else:
                 search_items = []
             
-            logger.info(f"Search API returned {len(search_items)} results for loan number {loan_number}")
+            logger.error(f"Search API returned {len(search_items)} results for loan number {loan_number}")
             
             # Check each search result for matching loan number in custom field
             for item in search_items:
@@ -1500,11 +1504,8 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                 if isinstance(deal_person_id, dict):
                     deal_person_id = deal_person_id.get("value")
                 
-                # Must match person
-                if not deal_person_id or int(deal_person_id) != person_id:
-                    continue
-                
-                # Check loan number custom field
+                # Check loan number custom field FIRST (loan number is unique identifier)
+                # We'll verify person match after, but loan number takes priority
                 if LOAN_NUMBER_KEY:
                     loan_number_field = deal.get(LOAN_NUMBER_KEY)
                     if loan_number_field:
@@ -1514,16 +1515,22 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                             field_value = loan_number_field
                         
                         if str(field_value) == str(loan_number):
-                            # Found matching deal - store mapping first
+                            # Found matching deal by loan number (unique identifier)
+                            logger.error(f"✓ FOUND Deal {deal_id} with matching Loan Number {loan_number}")
+                            
+                            # Check person match (warn if different, but still use the deal)
+                            if deal_person_id and int(deal_person_id) != person_id:
+                                logger.warning(f"Deal {deal_id} is associated with Person {deal_person_id}, but current person is {person_id} - using deal anyway (loan number is unique)")
+                            
+                            # Store mapping first
                             store_deal_mapping(salesforce_loan_id, deal_id)
                             
                             # Check if archived/lost
-                            logger.info(f"Found Deal {deal_id} with matching Loan Number {loan_number} in search results")
                             if is_deal_archived_or_lost(deal_id):
                                 logger.info(f"Deal {deal_id} is archived or lost - skipping sync (mapping stored)")
                                 return None
                             else:
-                                logger.info(f"Found existing Deal {deal_id} by Loan Number {loan_number} - updating")
+                                logger.error(f"✓ Deal {deal_id} is active - UPDATING IT")
                                 update_deal(deal_id, loan_data, person_id, salesforce_loan_id)
                                 return deal_id
         except Exception as e:
