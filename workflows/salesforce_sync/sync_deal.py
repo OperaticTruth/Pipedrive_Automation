@@ -1337,8 +1337,10 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     
     # Step 0: Check stored mapping first (handles archived deals)
     # This is our workaround since archived deals can't be queried via API
+    logger.info(f"Checking stored mapping for Salesforce Loan ID {salesforce_loan_id}")
     mapped_deal_id = get_deal_id_for_loan(salesforce_loan_id)
     if mapped_deal_id:
+        logger.info(f"Found Deal {mapped_deal_id} in stored mapping for Loan {salesforce_loan_id}")
         # Try to fetch the deal to check if it exists and is active
         try:
             deal_url = f"{BASE_URL}/deals/{mapped_deal_id}?api_token={PIPEDRIVE_API_KEY}"
@@ -1371,12 +1373,14 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
         except requests.exceptions.HTTPError as e:
             # If we get 404, the deal is likely archived (can't be fetched)
             if e.response.status_code == 404:
-                logger.info(f"Deal {mapped_deal_id} from mapping not found (likely archived) - skipping sync")
+                logger.info(f"Deal {mapped_deal_id} from mapping not found (404 - likely archived) - skipping sync")
                 return None
             # Other errors - log but continue with normal search
             logger.warning(f"Error fetching deal {mapped_deal_id} from mapping: {e}")
         except Exception as e:
             logger.warning(f"Error checking mapped deal {mapped_deal_id}: {e}")
+    else:
+        logger.info(f"No stored mapping found for Salesforce Loan ID {salesforce_loan_id}")
     
     # Step 1: Check for existing deal by Salesforce Loan ID (already synced)
     # Include archived deals so we can check their status
@@ -1473,10 +1477,13 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                             field_value = loan_number_field
                         
                         if str(field_value) == str(loan_number):
-                            # Found matching deal - check if archived/lost
+                            # Found matching deal - store mapping first
+                            store_deal_mapping(salesforce_loan_id, deal_id)
+                            
+                            # Check if archived/lost
                             logger.info(f"Found Deal {deal_id} with matching Loan Number {loan_number} in search results")
                             if is_deal_archived_or_lost(deal_id):
-                                logger.info(f"Deal {deal_id} is archived or lost - skipping sync")
+                                logger.info(f"Deal {deal_id} is archived or lost - skipping sync (mapping stored)")
                                 return None
                             else:
                                 logger.info(f"Found existing Deal {deal_id} by Loan Number {loan_number} - updating")
