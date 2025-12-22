@@ -1509,15 +1509,32 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                 
                 logger.error(f"  Checking Deal {deal_id}")
                 
-                deal_person_id = deal.get("person_id")
+                # Search API results don't always include custom fields - fetch full deal
+                try:
+                    full_deal_url = f"{BASE_URL}/deals/{deal_id}?api_token={PIPEDRIVE_API_KEY}"
+                    full_deal_resp = requests.get(full_deal_url)
+                    full_deal_resp.raise_for_status()
+                    full_deal_result = full_deal_resp.json()
+                    
+                    if full_deal_result.get("success"):
+                        full_deal = full_deal_result.get("data", {})
+                        logger.error(f"  Fetched full deal {deal_id}")
+                    else:
+                        logger.error(f"  Failed to fetch full deal {deal_id}")
+                        continue
+                except Exception as e:
+                    logger.error(f"  Error fetching full deal {deal_id}: {e}")
+                    continue
+                
+                deal_person_id = full_deal.get("person_id")
                 if isinstance(deal_person_id, dict):
                     deal_person_id = deal_person_id.get("value")
                 
                 # Check loan number custom field FIRST (loan number is unique identifier)
-                # We'll verify person match after, but loan number takes priority
+                # Custom fields are at root level in Pipedrive API
                 if LOAN_NUMBER_KEY:
                     logger.error(f"  Looking for loan number field: {LOAN_NUMBER_KEY}")
-                    loan_number_field = deal.get(LOAN_NUMBER_KEY)
+                    loan_number_field = full_deal.get(LOAN_NUMBER_KEY)
                     logger.error(f"  Deal {deal_id}: loan_number_field = {loan_number_field}")
                     if loan_number_field:
                         if isinstance(loan_number_field, dict):
