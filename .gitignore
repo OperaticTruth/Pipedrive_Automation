@@ -23,3 +23,8 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Deal mappings (contains deal IDs)
+deal_mappings.json
+
+
+

@@ -9,6 +9,7 @@ import logging
 from typing import Dict, Optional
 from config import PIPEDRIVE_API_KEY
 from .sync_person import sync_person_from_contact, sync_coborrower_from_loan
+from .deal_mapping import get_deal_id_for_loan, store_deal_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -1146,6 +1147,10 @@ def create_deal(loan_data: Dict, person_id: int, salesforce_loan_id: str) -> Opt
             deal_id = result.get("data", {}).get("id")
             logger.info(f"Created Deal {deal_id} from Salesforce Loan {salesforce_loan_id}")
             
+            # Store mapping for future reference (handles archived deals)
+            if salesforce_loan_id:
+                store_deal_mapping(salesforce_loan_id, deal_id)
+            
             # Calculate commission after creating deal
             try:
                 from workflows.commission import calculate_commission_for_deal
@@ -1330,11 +1335,57 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     # Handle co-borrower if present
     coborrower_person_id = sync_coborrower_from_loan(loan_data)
     
+    # Step 0: Check stored mapping first (handles archived deals)
+    # This is our workaround since archived deals can't be queried via API
+    mapped_deal_id = get_deal_id_for_loan(salesforce_loan_id)
+    if mapped_deal_id:
+        # Try to fetch the deal to check if it exists and is active
+        try:
+            deal_url = f"{BASE_URL}/deals/{mapped_deal_id}?api_token={PIPEDRIVE_API_KEY}"
+            deal_resp = requests.get(deal_url)
+            deal_resp.raise_for_status()
+            deal_result = deal_resp.json()
+            
+            if deal_result.get("success"):
+                deal = deal_result.get("data", {})
+                # Check if archived or lost
+                if deal.get("active") == False or deal.get("status") == "lost":
+                    logger.info(f"Deal {mapped_deal_id} from mapping is archived or lost - skipping sync")
+                    return None
+                
+                # Deal exists and is active - update it
+                logger.info(f"Found Deal {mapped_deal_id} from stored mapping - updating")
+                update_deal(mapped_deal_id, loan_data, person_id, salesforce_loan_id)
+                # Update co-borrower association if we have one
+                if coborrower_person_id:
+                    from config import COBORROWER_NAME_KEY
+                    if COBORROWER_NAME_KEY:
+                        try:
+                            url = f"{BASE_URL}/deals/{mapped_deal_id}?api_token={PIPEDRIVE_API_KEY}"
+                            resp = requests.put(url, json={COBORROWER_NAME_KEY: coborrower_person_id})
+                            resp.raise_for_status()
+                            logger.info(f"Updated co-borrower association for Deal {mapped_deal_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to update co-borrower: {e}")
+                return mapped_deal_id
+        except requests.exceptions.HTTPError as e:
+            # If we get 404, the deal is likely archived (can't be fetched)
+            if e.response.status_code == 404:
+                logger.info(f"Deal {mapped_deal_id} from mapping not found (likely archived) - skipping sync")
+                return None
+            # Other errors - log but continue with normal search
+            logger.warning(f"Error fetching deal {mapped_deal_id} from mapping: {e}")
+        except Exception as e:
+            logger.warning(f"Error checking mapped deal {mapped_deal_id}: {e}")
+    
     # Step 1: Check for existing deal by Salesforce Loan ID (already synced)
     # Include archived deals so we can check their status
     existing_deal_id = find_deal_by_salesforce_id(salesforce_loan_id, include_archived=True)
     
     if existing_deal_id:
+        # Store the mapping for future reference
+        store_deal_mapping(salesforce_loan_id, existing_deal_id)
+        
         # Check if deal is archived or lost - if so, skip syncing
         if is_deal_archived_or_lost(existing_deal_id):
             logger.info(f"Deal {existing_deal_id} is archived or lost - skipping sync")
@@ -1438,6 +1489,9 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
         existing_deal_by_loan_number = find_deal_by_loan_number(loan_number, person_id, include_archived=True)
         
         if existing_deal_by_loan_number:
+            # Store the mapping for future reference
+            store_deal_mapping(salesforce_loan_id, existing_deal_by_loan_number)
+            
             # Check if deal is archived or lost - if so, skip syncing
             if is_deal_archived_or_lost(existing_deal_by_loan_number):
                 logger.info(f"Deal {existing_deal_by_loan_number} is archived or lost - skipping sync")
