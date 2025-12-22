@@ -233,5 +233,25 @@ def health_check():
     """Health check endpoint."""
     return jsonify({"status": "ok"}), 200
 
+@app.route('/build-mapping', methods=['POST', 'GET'])
+def build_mapping():
+    """Manually build deal mapping from Pipedrive (one-time setup)."""
+    from workflows.salesforce_sync.deal_mapping import build_mapping_from_pipedrive
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        mappings = build_mapping_from_pipedrive()
+        return jsonify({
+            "success": True,
+            "message": f"Built mapping with {len(mappings)} deals"
+        }), 200
+    except Exception as e:
+        logger.error(f"Error building mapping: {e}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
