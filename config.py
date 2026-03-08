@@ -116,3 +116,7 @@ LABEL_DOCS_OUT_ID=int(os.getenv("LABEL_DOCS_OUT_ID", "0"))
 LABEL_CLOSED_ID=int(os.getenv("LABEL_CLOSED_ID", "0"))
 LABEL_SUSPENDED_ID=int(os.getenv("LABEL_SUSPENDED_ID", "0"))
 LABEL_CANCELLED_ID=int(os.getenv("LABEL_CANCELLED_ID", "0"))
+
+# Dialpad integration
+DIALPAD_API_KEY = os.getenv("DIALPAD_API_KEY")
+DIALPAD_WEBHOOK_SECRET = os.getenv("DIALPAD_WEBHOOK_SECRET")
