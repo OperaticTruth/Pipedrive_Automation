@@ -1,6 +1,8 @@
 import os
-import xml.etree.ElementTree as ET
-from flask import Flask, request, jsonify, Response
+import logging
+from flask import Flask, request, jsonify
+
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 from workflows.loan_amount_sync import loan_amount_sync
 from workflows.first_payment_date import calculate_first_payment_date
 from workflows.calculate_210_days import calculate_210_days
@@ -13,8 +15,17 @@ from workflows.agent_stage_labels import agent_stage_labels
 
 # Salesforce sync imports
 from workflows.salesforce_sync import run_polling_sync, handle_cdc_event, run_initial_sync
-from workflows.salesforce_sync.salesforce_client import SalesforceClient
-from workflows.salesforce_sync.sync_deal import sync_deal_from_loan
+
+# Dialpad integration
+from workflows.dialpad import (
+    handle_call_event,
+    handle_sms_event,
+    handle_dialpad_contact_event,
+    run_dialpad_contact_sync,
+    resolve_pending_names,
+)
+from workflows.dialpad.utils import decode_dialpad_webhook
+from config import DIALPAD_WEBHOOK_SECRET
 
 app = Flask(__name__)
 
@@ -69,21 +80,70 @@ def sync_initial():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/webhook/salesforce/cdc', methods=['POST', 'GET'])
+def _dialpad_payload():
+    """Decode Dialpad webhook body: JSON or JWT."""
+    data = request.get_json(silent=True)
+    if data is not None:
+        return data
+    raw = request.get_data(as_text=True)
+    return decode_dialpad_webhook(raw, DIALPAD_WEBHOOK_SECRET)
+
+@app.route('/webhook/dialpad/call', methods=['POST'])
+def handle_dialpad_call():
+    try:
+        event_data = _dialpad_payload()
+        logging.debug("DIALPAD CALL PAYLOAD: %s", event_data)
+        result = handle_call_event(event_data)
+        logging.debug("DIALPAD CALL RESULT: %s", result)
+        return jsonify(result), 200 if result.get('success') else 500
+    except Exception as e:
+        logging.exception("Error in handle_dialpad_call")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/webhook/dialpad/sms', methods=['POST'])
+def handle_dialpad_sms():
+    try:
+        event_data = _dialpad_payload()
+        result = handle_sms_event(event_data)
+        return jsonify(result), 200 if result.get('success') else 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/webhook/dialpad/contact', methods=['POST'])
+def handle_dialpad_contact():
+    try:
+        event_data = _dialpad_payload()
+        result = handle_dialpad_contact_event(event_data)
+        return jsonify(result), 200 if result.get('success') else 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/sync/dialpad/contacts', methods=['POST', 'GET'])
+def sync_dialpad_contacts():
+    """Manually trigger Pipedrive → Dialpad contact sync."""
+    try:
+        result = run_dialpad_contact_sync()
+        return jsonify(result), 200 if result.get('success') else 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/sync/dialpad/resolve-pending', methods=['POST', 'GET'])
+def sync_resolve_pending():
+    """Check Dialpad for real names on PD placeholder contacts and update PD."""
+    try:
+        result = resolve_pending_names()
+        return jsonify(result), 200 if result.get('success') else 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/webhook/salesforce/cdc', methods=['POST'])
 def handle_salesforce_cdc():
     """
     Handle Change Data Capture events from Salesforce.
     
     This endpoint receives real-time updates from Salesforce when
     Loan records are created or updated.
-    
-    GET requests are used by Salesforce for webhook verification/challenge.
     """
-    if request.method == 'GET':
-        # Salesforce CDC may send GET requests for verification/challenge
-        # Return 200 OK to acknowledge
-        return jsonify({"status": "ok", "message": "CDC webhook endpoint is active"}), 200
-    
     try:
         event_data = request.get_json()
         result = handle_cdc_event(event_data)
@@ -91,167 +151,10 @@ def handle_salesforce_cdc():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/webhook/salesforce/outbound', methods=['POST'])
-def handle_salesforce_outbound():
-    """
-    Handle Salesforce Outbound Messages (SOAP/XML format).
-    
-    This endpoint receives SOAP XML messages from Salesforce Workflow
-    Outbound Messages when Loan records are created or updated.
-    """
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    try:
-        # Parse SOAP XML
-        xml_data = request.data
-        root = ET.fromstring(xml_data)
-        
-        # Extract namespace (Salesforce SOAP uses namespaces)
-        namespaces = {
-            'soapenv': 'http://schemas.xmlsoap.org/soap/envelope/',
-            'notifications': 'http://soap.sforce.com/2005/09/outbound'
-        }
-        
-        # Find the notification body
-        body = root.find('.//soapenv:Body', namespaces)
-        if body is None:
-            # Try without namespace
-            body = root.find('.//Body')
-        
-        if body is None:
-            logger.error("Could not find SOAP Body element")
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-            return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        
-        # Find notifications element
-        notifications = body.find('.//notifications:notifications', namespaces)
-        if notifications is None:
-            # Try without namespace
-            notifications = body.find('.//notifications')
-        
-        if notifications is None:
-            logger.error("Could not find notifications element")
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-            return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        
-        # Extract Loan ID from the notification
-        # Try multiple ways to find the Id field
-        loan_id = None
-        
-        # Method 1: Look for Notification > sObject > Id
-        notification = notifications.find('.//notifications:Notification', namespaces)
-        if notification is None:
-            notification = notifications.find('.//Notification')
-        
-        if notification is not None:
-            # Try to find sObject
-            s_object = notification.find('.//sObject', namespaces)
-            if s_object is None:
-                s_object = notification.find('.//sObject')
-            if s_object is None:
-                # Maybe sObject is directly in notification with namespace
-                for prefix, uri in namespaces.items():
-                    s_object = notification.find(f'.//{{{uri}}}sObject')
-                    if s_object is not None:
-                        break
-            
-            if s_object is not None:
-                loan_id_elem = s_object.find('.//Id', namespaces)
-                if loan_id_elem is None:
-                    loan_id_elem = s_object.find('.//Id')
-                if loan_id_elem is None:
-                    # Try with namespace
-                    for prefix, uri in namespaces.items():
-                        loan_id_elem = s_object.find(f'.//{{{uri}}}Id')
-                        if loan_id_elem is not None:
-                            break
-                
-                if loan_id_elem is not None and loan_id_elem.text:
-                    loan_id = loan_id_elem.text
-        
-        # Method 2: Search for Id anywhere in the notification
-        if not loan_id and notification is not None:
-            # Search for any Id element in notification
-            for elem in notification.iter():
-                if elem.tag.endswith('Id') or elem.tag == 'Id':
-                    if elem.text and elem.text.startswith('a0'):
-                        loan_id = elem.text
-                        break
-        
-        # Method 3: Search entire body for Id
-        if not loan_id:
-            for elem in body.iter():
-                if elem.tag.endswith('Id') or elem.tag == 'Id':
-                    if elem.text and elem.text.startswith('a0'):
-                        loan_id = elem.text
-                        break
-        
-        if not loan_id:
-            logger.error("Could not find Loan ID in XML")
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-            return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        
-        # Fetch the full loan record from Salesforce
-        sf_client = SalesforceClient()
-        loan = sf_client.get_loan_by_id(loan_id)
-        
-        if not loan:
-            logger.error(f"Could not fetch Loan {loan_id} from Salesforce")
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-            return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        
-        # Sync the loan to Pipedrive
-        deal_id = sync_deal_from_loan(loan)
-        
-        if deal_id:
-            logger.info(f"Synced Loan {loan_id} to Deal {deal_id}")
-            # Return success SOAP response with correct Content-Type
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>true</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-            return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-        else:
-            # None is returned when sync is intentionally skipped (archived/lost/cancelled deals)
-            # This is expected behavior, not a failure
-            logger.info(f"Sync skipped for Loan {loan_id} (deal is archived, lost, or cancelled)")
-            # Still return success to Salesforce since we handled it correctly
-            soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>true</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-            return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-            
-    except ET.ParseError as e:
-        logger.error(f"XML parsing error: {e}")
-        # Return error SOAP response
-        soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-        return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-    except Exception as e:
-        logger.error(f"Error processing outbound message: {e}", exc_info=True)
-        # Return error SOAP response
-        soap_response = '<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><notifications:notificationsResponse xmlns:notifications="http://soap.sforce.com/2005/09/outbound"><notifications:Ack>false</notifications:Ack></notifications:notificationsResponse></soapenv:Body></soapenv:Envelope>'
-        return Response(soap_response, mimetype='text/xml; charset=utf-8'), 200
-
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint."""
     return jsonify({"status": "ok"}), 200
-
-@app.route('/build-mapping', methods=['POST', 'GET'])
-def build_mapping():
-    """Manually build deal mapping from Pipedrive (one-time setup)."""
-    from workflows.salesforce_sync.deal_mapping import build_mapping_from_pipedrive
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    try:
-        mappings = build_mapping_from_pipedrive()
-        return jsonify({
-            "success": True,
-            "message": f"Built mapping with {len(mappings)} deals"
-        }), 200
-    except Exception as e:
-        logger.error(f"Error building mapping: {e}", exc_info=True)
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
