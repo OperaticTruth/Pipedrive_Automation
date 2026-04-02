@@ -1,6 +1,6 @@
 import os
 import logging
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 from workflows.loan_amount_sync import loan_amount_sync
@@ -14,7 +14,13 @@ from workflows.average_buy_volume import calculate_average_buy_volume
 from workflows.agent_stage_labels import agent_stage_labels
 
 # Salesforce sync imports
-from workflows.salesforce_sync import run_polling_sync, handle_cdc_event, run_initial_sync
+from workflows.salesforce_sync import (
+    run_polling_sync,
+    handle_cdc_event,
+    run_initial_sync,
+    handle_outbound_message,
+    build_outbound_message_ack,
+)
 
 # Dialpad integration
 from workflows.dialpad import (
@@ -139,16 +145,51 @@ def sync_resolve_pending():
 @app.route('/webhook/salesforce/cdc', methods=['POST'])
 def handle_salesforce_cdc():
     """
-    Handle Change Data Capture events from Salesforce.
-    
-    This endpoint receives real-time updates from Salesforce when
-    Loan records are created or updated.
+    Handle Salesforce change notifications.
+
+    Historically this route expected Salesforce CDC-style JSON, but Salesforce
+    Outbound Messages send SOAP XML over HTTP POST. To keep the existing URL
+    working, this route now supports both:
+    - JSON payloads → existing CDC handler
+    - SOAP XML payloads → outbound message handler
     """
     try:
-        event_data = request.get_json()
-        result = handle_cdc_event(event_data)
-        return jsonify(result), 200 if result.get('success') else 500
+        event_data = request.get_json(silent=True)
+        if event_data is not None:
+            result = handle_cdc_event(event_data)
+            return jsonify(result), 200 if result.get('success') else 500
+
+        xml_payload = request.get_data()
+        if xml_payload:
+            result = handle_outbound_message(xml_payload)
+            if result.get('failed'):
+                return jsonify(result), 500
+            return Response(build_outbound_message_ack(), status=200, mimetype='text/xml')
+
+        return jsonify({"success": False, "error": "Request body was empty"}), 400
     except Exception as e:
+        logging.exception("Error handling Salesforce change notification")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/webhook/salesforce/outbound-message', methods=['POST'])
+def handle_salesforce_outbound_message():
+    """
+    Handle Salesforce Outbound Message SOAP payloads.
+
+    This is the correct endpoint for Salesforce Flow / Workflow Outbound Message
+    actions. It parses SOAP XML, extracts the loan ID, fetches the full loan from
+    Salesforce, and reuses the existing sync logic.
+    """
+    try:
+        xml_payload = request.get_data()
+        result = handle_outbound_message(xml_payload)
+
+        if result.get('failed'):
+            return jsonify(result), 500
+
+        return Response(build_outbound_message_ack(), status=200, mimetype='text/xml')
+    except Exception as e:
+        logging.exception("Error handling Salesforce outbound message")
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])

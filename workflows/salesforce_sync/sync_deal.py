@@ -33,10 +33,10 @@ def format_address_for_pipedrive(loan_data: Dict) -> Optional[str]:
     Returns:
         Formatted address string or None
     """
-    address = loan_data.get("MtgPlanner_CRM__Property_Address__c", "").strip()
-    city = loan_data.get("MtgPlanner_CRM__Property_City__c", "").strip()
-    state = loan_data.get("MtgPlanner_CRM__Property_State__c", "").strip()
-    postal = loan_data.get("MtgPlanner_CRM__Property_Postal_Code__c", "").strip()
+    address = str(loan_data.get("MtgPlanner_CRM__Property_Address__c") or "").strip()
+    city = str(loan_data.get("MtgPlanner_CRM__Property_City__c") or "").strip()
+    state = str(loan_data.get("MtgPlanner_CRM__Property_State__c") or "").strip()
+    postal = str(loan_data.get("MtgPlanner_CRM__Property_Postal_Code__c") or "").strip()
     
     # Build address parts
     parts = []
