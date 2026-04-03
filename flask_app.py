@@ -172,6 +172,7 @@ def handle_salesforce_cdc():
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/webhook/salesforce/outbound-message', methods=['POST'])
+@app.route('/webhook/salesforce/outbound', methods=['POST'])
 def handle_salesforce_outbound_message():
     """
     Handle Salesforce Outbound Message SOAP payloads.
@@ -179,6 +180,9 @@ def handle_salesforce_outbound_message():
     This is the correct endpoint for Salesforce Flow / Workflow Outbound Message
     actions. It parses SOAP XML, extracts the loan ID, fetches the full loan from
     Salesforce, and reuses the existing sync logic.
+
+    Accepts both /webhook/salesforce/outbound-message and /webhook/salesforce/outbound
+    because the SF Outbound Message is configured with the shorter URL.
     """
     try:
         xml_payload = request.get_data()

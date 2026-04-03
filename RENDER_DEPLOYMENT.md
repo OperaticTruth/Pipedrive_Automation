@@ -47,7 +47,7 @@ SALESFORCE_DOMAIN=login
 #### Salesforce Configuration:
 ```
 SALESFORCE_LOAN_OBJECT=MtgPlanner_CRM__Transaction_Property__c
-SALESFORCE_LOAN_OFFICER_FIELD=MtgPlanner_CRM__Loan_Officer__c
+SALESFORCE_LOAN_OFFICER_FIELD=Loan_Officer__c
 SALESFORCE_PRIMARY_BORROWER_FIELD=MtgPlanner_CRM__Borrower_Name__c
 SALESFORCE_LOAN_OFFICER=Jake Elmendorf
 ```
