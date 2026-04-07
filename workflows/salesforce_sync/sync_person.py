@@ -6,6 +6,7 @@ Handles syncing Salesforce Contact records to Pipedrive Persons.
 
 import requests
 import logging
+import re
 from typing import Dict, Optional
 from config import PIPEDRIVE_API_KEY, GROUP_KEY, CONTACT_GROUP_KEY, PIPEDRIVE_SALESFORCE_CONTACT_ID_KEY, LEAD_GROUP_ID, BORROWER_GROUP_ID, CONTACT_TYPE_KEY, CONTACT_TYPE_CLIENT_ID, CONTACT_TYPE_BUSINESS_ID
 
@@ -101,6 +102,127 @@ def find_person_by_email(email: str) -> Optional[int]:
         logger.error(f"Error searching for person by email: {e}")
         import traceback
         traceback.print_exc()
+        return None
+
+
+def find_person_by_phone(phone: str) -> Optional[int]:
+    """
+    Find a Pipedrive Person by phone number.
+    
+    Args:
+        phone: Phone number to search for
+        
+    Returns:
+        Pipedrive Person ID if found, None otherwise
+    """
+    if not phone:
+        return None
+    
+    normalized_phone = re.sub(r"\D", "", phone)
+    if len(normalized_phone) < 7:
+        return None
+    
+    url = f"{BASE_URL}/persons/search"
+    params = {
+        "api_token": PIPEDRIVE_API_KEY,
+        "term": normalized_phone,
+        "fields": "phone"
+    }
+    
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        result = resp.json()
+        
+        if not result.get("success", True):
+            logger.warning(f"Person phone search returned success=False: {result}")
+            return None
+        
+        data = result.get("data", {})
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("items", [])
+        else:
+            items = []
+        
+        exact_matches = []
+        
+        for item in items:
+            if isinstance(item, dict) and "item" in item:
+                person = item.get("item", {})
+            elif isinstance(item, dict):
+                person = item
+            else:
+                continue
+            
+            person_id = person.get("id")
+            if not person_id:
+                continue
+            
+            try:
+                person_url = f"{BASE_URL}/persons/{person_id}?api_token={PIPEDRIVE_API_KEY}"
+                person_resp = requests.get(person_url)
+                person_resp.raise_for_status()
+                person_result = person_resp.json()
+                if person_result.get("success"):
+                    full_person = person_result.get("data", {})
+                    person_phones = full_person.get("phone", [])
+                else:
+                    full_person = person
+                    person_phones = person.get("phone", [])
+            except Exception as e:
+                logger.warning(f"Failed to fetch person {person_id} during phone match: {e}")
+                full_person = person
+                person_phones = person.get("phone", [])
+            
+            for phone_obj in person_phones:
+                if isinstance(phone_obj, dict):
+                    phone_value = phone_obj.get("value", "")
+                else:
+                    phone_value = str(phone_obj)
+                
+                stored_normalized = re.sub(r"\D", "", phone_value)
+                if stored_normalized == normalized_phone:
+                    exact_matches.append((person_id, full_person))
+                    break
+        
+        if not exact_matches:
+            return None
+        
+        if len(exact_matches) == 1:
+            person_id = exact_matches[0][0]
+            logger.info(f"Found existing Person {person_id} with phone {phone}")
+            return person_id
+        
+        # If duplicates share the same exact phone, prefer the person who still has an active lead.
+        for person_id, _full_person in exact_matches:
+            try:
+                leads_url = f"{BASE_URL}/leads"
+                leads_resp = requests.get(leads_url, params={
+                    "api_token": PIPEDRIVE_API_KEY,
+                    "person_id": person_id,
+                    "archived_status": "not_archived"
+                })
+                leads_resp.raise_for_status()
+                leads_result = leads_resp.json()
+                leads_data = leads_result.get("data", [])
+                if isinstance(leads_data, dict):
+                    leads_data = leads_data.get("items", [])
+                if leads_data:
+                    logger.info(f"Found existing Person {person_id} with phone {phone} and active lead")
+                    return person_id
+            except Exception as e:
+                logger.warning(f"Failed checking leads for Person {person_id} during phone match: {e}")
+        
+        person_id = exact_matches[0][0]
+        logger.info(f"Found existing Person {person_id} with phone {phone}")
+        return person_id
+        
+    except Exception as e:
+        logger.error(f"Error searching for person by phone: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
@@ -517,6 +639,7 @@ def sync_person_from_contact(contact_data: Dict) -> Optional[int]:
     salesforce_contact_id = None
     contact_fields = {}
     email = None
+    raw_email = None
     
     # Check if this is a direct Contact record
     if "Id" in contact_data and contact_data.get("Name") and primary_borrower_field not in contact_data:
@@ -528,6 +651,7 @@ def sync_person_from_contact(contact_data: Dict) -> Optional[int]:
             "Phone": contact_data.get("Phone"),
         }
         email = contact_data.get("Email")
+        raw_email = email
     else:
         # Nested from Loan lookup - try different patterns
         borrower_relationship = primary_borrower_field.replace("__c", "__r")
@@ -541,6 +665,7 @@ def sync_person_from_contact(contact_data: Dict) -> Optional[int]:
                 "Phone": borrower_r.get("Phone"),
             }
             email = borrower_r.get("Email")
+            raw_email = email
         else:
             logger.error(f"Could not extract Contact ID from data. Keys: {list(contact_data.keys())}")
             return None
@@ -549,35 +674,42 @@ def sync_person_from_contact(contact_data: Dict) -> Optional[int]:
         logger.error("No Salesforce Contact ID found in contact data")
         return None
     
+    phone = contact_fields.get("Phone")
+    
     if not email:
         logger.warning(f"Contact {salesforce_contact_id} missing email - using name as fallback")
         email = contact_fields.get("Name", "unknown")
     
-    # Find existing person by email (primary matching method)
-    existing_person_id = find_person_by_email(email)
-    
-    # Also check by Salesforce Contact ID (in case email changed)
+    # Lookup order: Salesforce Contact ID, Email, Phone
     existing_by_sf_id = find_person_by_salesforce_id(salesforce_contact_id)
+    existing_by_email = find_person_by_email(raw_email) if raw_email else None
+    existing_by_phone = find_person_by_phone(phone) if phone else None
     
-    # Use the existing person if found by either method
-    if existing_person_id:
-        # Person found by email - update Salesforce ID if not set, but don't update contact info
-        is_initial = not existing_by_sf_id  # Initial if Salesforce ID not already set
-        update_person(existing_person_id, contact_fields, salesforce_contact_id, email, is_initial=is_initial)
+    if existing_by_sf_id:
+        update_person(existing_by_sf_id, contact_fields, salesforce_contact_id, email, is_initial=False)
         
-        # Update groups: remove "Lead", add "Borrower" (since this is from a loan sync)
-        # Use option IDs if available, otherwise use names
         remove_ids = [LEAD_GROUP_ID] if LEAD_GROUP_ID else ["Lead"]
         add_ids = [BORROWER_GROUP_ID] if BORROWER_GROUP_ID else ["Borrower"]
-        update_person_groups(existing_person_id, remove_groups=remove_ids, add_groups=add_ids)
+        update_person_groups(existing_by_sf_id, remove_groups=remove_ids, add_groups=add_ids)
         
-        return existing_person_id
-    elif existing_by_sf_id:
-        # Person found by Salesforce ID but different email - this shouldn't happen per requirements
-        # But handle it gracefully
-        logger.warning(f"Person found by Salesforce ID but email mismatch - updating email")
-        update_person(existing_by_sf_id, contact_fields, salesforce_contact_id, email, is_initial=True)
         return existing_by_sf_id
+    elif existing_by_email:
+        update_person(existing_by_email, contact_fields, salesforce_contact_id, email, is_initial=True)
+        
+        remove_ids = [LEAD_GROUP_ID] if LEAD_GROUP_ID else ["Lead"]
+        add_ids = [BORROWER_GROUP_ID] if BORROWER_GROUP_ID else ["Borrower"]
+        update_person_groups(existing_by_email, remove_groups=remove_ids, add_groups=add_ids)
+        
+        return existing_by_email
+    elif existing_by_phone:
+        logger.info(f"Found existing Person {existing_by_phone} by phone for Salesforce Contact {salesforce_contact_id}")
+        update_person(existing_by_phone, contact_fields, salesforce_contact_id, email, is_initial=True)
+        
+        remove_ids = [LEAD_GROUP_ID] if LEAD_GROUP_ID else ["Lead"]
+        add_ids = [BORROWER_GROUP_ID] if BORROWER_GROUP_ID else ["Borrower"]
+        update_person_groups(existing_by_phone, remove_groups=remove_ids, add_groups=add_ids)
+        
+        return existing_by_phone
     else:
         # Create new person
         return create_person(contact_fields, salesforce_contact_id, email)
@@ -617,8 +749,8 @@ def sync_coborrower_from_loan(loan_data: Dict) -> Optional[int]:
         co_phone = ""
         co_birthday = None
     
-    # If no co-borrower email, there's no co-borrower
-    if not co_email:
+    # If no co-borrower email or phone, there's no co-borrower
+    if not co_email and not co_phone:
         return None
     
     # Combine first and last name
@@ -626,8 +758,10 @@ def sync_coborrower_from_loan(loan_data: Dict) -> Optional[int]:
     if not co_name:
         co_name = co_email  # Use email as name if no name
     
-    # Find existing person by email
-    existing_person_id = find_person_by_email(co_email)
+    # Find existing person by email first, then phone fallback
+    existing_person_id = find_person_by_email(co_email) if co_email else None
+    if not existing_person_id and co_phone:
+        existing_person_id = find_person_by_phone(co_phone)
     
     if existing_person_id:
         # Update existing person with co-borrower data
@@ -640,7 +774,10 @@ def sync_coborrower_from_loan(loan_data: Dict) -> Optional[int]:
         # But ensure Salesforce Contact ID is set if we have it
         # Note: Co-borrower doesn't have a separate Contact ID in Salesforce
         # So we'll just ensure the person exists and is linked
-        logger.info(f"Found existing co-borrower Person {existing_person_id} with email {co_email}")
+        if co_email:
+            logger.info(f"Found existing co-borrower Person {existing_person_id} with email {co_email}")
+        else:
+            logger.info(f"Found existing co-borrower Person {existing_person_id} with phone {co_phone}")
         
         # Update Contact Type to "Client" (unless it's already "Business")
         update_person_contact_type(existing_person_id)
@@ -650,9 +787,10 @@ def sync_coborrower_from_loan(loan_data: Dict) -> Optional[int]:
         # Create new co-borrower person
         person_data = {
             "name": co_name,
-            "email": [{"value": co_email, "primary": True}],
         }
         
+        if co_email:
+            person_data["email"] = [{"value": co_email, "primary": True}]
         if co_phone:
             person_data["phone"] = [{"value": co_phone, "primary": True}]
         

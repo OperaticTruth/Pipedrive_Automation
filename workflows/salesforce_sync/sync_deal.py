@@ -206,13 +206,83 @@ def map_salesforce_status_to_label(salesforce_status: str) -> Optional[int]:
     return None
 
 
-def find_active_lead_for_person(person_id: int) -> Optional[int]:
+def add_deal_participant(deal_id: int, person_id: int) -> bool:
+    """
+    Add a person as a participant on a deal.
+    Skips if the person is already a participant or is the deal owner.
+    Returns True if added, False if skipped or failed.
+    """
+    try:
+        deal_url = f"{BASE_URL}/deals/{deal_id}?api_token={PIPEDRIVE_API_KEY}"
+        deal_resp = requests.get(deal_url)
+        deal_resp.raise_for_status()
+        deal_result = deal_resp.json()
+
+        if deal_result.get("success"):
+            deal = deal_result.get("data", {}) or {}
+            deal_person_id = deal.get("person_id")
+            if isinstance(deal_person_id, dict):
+                deal_person_id = deal_person_id.get("value")
+
+            if deal_person_id and int(deal_person_id) == int(person_id):
+                logger.info(f"Person {person_id} is the primary person on Deal {deal_id} - skipping participant add")
+                return False
+    except Exception as e:
+        logger.warning(f"Failed to fetch Deal {deal_id} before adding participant: {e}")
+        return False
+
+    participants_url = f"{BASE_URL}/deals/{deal_id}/participants?api_token={PIPEDRIVE_API_KEY}"
+
+    try:
+        participants_resp = requests.get(participants_url)
+        participants_resp.raise_for_status()
+        participants_result = participants_resp.json()
+        participants = participants_result.get("data") or []
+
+        if not isinstance(participants, list):
+            participants = []
+
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+
+            participant_person_id = participant.get("person_id")
+            if isinstance(participant_person_id, dict):
+                participant_person_id = participant_person_id.get("value")
+            elif participant_person_id is None:
+                person = participant.get("person")
+                if isinstance(person, dict):
+                    participant_person_id = person.get("id")
+
+            if participant_person_id and int(participant_person_id) == int(person_id):
+                logger.info(f"Person {person_id} is already a participant on Deal {deal_id}")
+                return False
+    except Exception as e:
+        logger.warning(f"Failed to fetch participants for Deal {deal_id}: {e}")
+        return False
+
+    try:
+        add_resp = requests.post(participants_url, json={"person_id": person_id})
+        add_resp.raise_for_status()
+        add_result = add_resp.json()
+
+        if add_result.get("success", True):
+            logger.info(f"Added Person {person_id} as participant on Deal {deal_id}")
+            return True
+
+        logger.warning(f"Failed to add participant to Deal {deal_id}: {add_result}")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to add participant to Deal {deal_id}: {e}")
+        return False
+
+
+def find_active_lead_for_person(person_id: int) -> Optional[str]:
     """
     Find the first active Lead associated with a Person.
     
     Active leads are those that are:
     - Not "Cancelled"
-    - Not "Applied"
     - Not archived
     
     Args:
@@ -225,7 +295,7 @@ def find_active_lead_for_person(person_id: int) -> Optional[int]:
     params = {
         "api_token": PIPEDRIVE_API_KEY,
         "person_id": person_id,
-        "status": "open"  # Only get non-archived leads
+        "archived_status": "not_archived"
     }
     
     try:
@@ -246,7 +316,7 @@ def find_active_lead_for_person(person_id: int) -> Optional[int]:
         if not data:
             return None
         
-        # Filter out "Cancelled" and "Applied" leads
+        # Filter out cancelled leads only
         # Check the label field to determine status
         for lead in data:
             lead_id = lead.get("id")
@@ -255,23 +325,29 @@ def find_active_lead_for_person(person_id: int) -> Optional[int]:
                 
             label = lead.get("label")
             
-            # Handle label - could be ID, dict with name, or None
+            # Handle label as dict, list, string, or None
             label_name = None
             if isinstance(label, dict):
-                label_name = label.get("name", "")
-            elif isinstance(label, (str, int)):
-                # If it's an ID, we'd need to look it up, but for now skip
-                # Most APIs return the label name directly
+                label_name = label.get("name")
+            elif isinstance(label, list) and label:
+                first_label = label[0]
+                if isinstance(first_label, dict):
+                    label_name = first_label.get("name")
+                elif isinstance(first_label, str):
+                    label_name = first_label
+            elif isinstance(label, str):
+                label_name = label
+            elif label is not None:
                 label_name = str(label)
             
-            # Skip if Cancelled or Applied
-            if label_name and label_name.lower() in ["cancelled", "applied"]:
+            # Skip only if Cancelled
+            if label_name and label_name.lower() == "cancelled":
                 logger.debug(f"Skipping Lead {lead_id} with label '{label_name}'")
                 continue
             
             # Found an active lead - return the first one
             logger.info(f"Found active Lead {lead_id} for Person {person_id} (label: {label_name})")
-            return lead_id
+            return str(lead_id)
         
         return None
         
@@ -282,7 +358,7 @@ def find_active_lead_for_person(person_id: int) -> Optional[int]:
         return None
 
 
-def convert_lead_to_deal(lead_id: int, loan_data: Dict, person_id: int) -> Optional[int]:
+def convert_lead_to_deal(lead_id: str, loan_data: Dict, person_id: int) -> Optional[int]:
     """
     Convert a Lead to a Deal using Pipedrive's conversion API.
     
@@ -328,9 +404,17 @@ def convert_lead_to_deal(lead_id: int, loan_data: Dict, person_id: int) -> Optio
         result = resp.json()
         
         if result.get("success"):
-            deal_id = result.get("data", {}).get("id")
+            logger.debug(f"Lead conversion v2 success response for Lead {lead_id}: {result}")
+            data = result.get("data", {}) or {}
+            deal_id = None
+            if isinstance(data, dict):
+                deal = data.get("deal", {})
+                if isinstance(deal, dict):
+                    deal_id = deal.get("id")
+                if deal_id is None:
+                    deal_id = data.get("id")
             logger.info(f"Converted Lead {lead_id} to Deal {deal_id} using v2 API")
-            return deal_id
+            return int(deal_id) if deal_id is not None else None
         else:
             logger.warning(f"v2 API returned success=False: {result}")
             # Fall through to fallback approach
@@ -344,18 +428,15 @@ def convert_lead_to_deal(lead_id: int, loan_data: Dict, person_id: int) -> Optio
         logger.warning(f"v2 API error: {e}")
         # Fall through to fallback approach
     
-    # Fallback: Create deal manually and mark lead as "Applied"
-    # This approach creates a new deal and updates the lead status
+    # Fallback: Create deal manually without touching the lead
     logger.info(f"Using fallback: creating Deal from Lead {lead_id} data")
     try:
         # Create deal from loan data
         deal_id = create_deal(loan_data, person_id, loan_data.get("Id"))
         
         if deal_id:
-            # Try to update lead to mark as "Applied"
-            # Note: This requires finding the "Applied" label ID
-            # For now, we'll just log - you can manually mark as Applied if needed
-            logger.info(f"Created Deal {deal_id} from Lead {lead_id} data. Please mark Lead {lead_id} as 'Applied' manually if needed.")
+            logger.warning(f"Lead {lead_id} could not be converted via v2 API. "
+                           f"Deal {deal_id} was created. Please manually convert and merge lead in PD.")
             return deal_id
         
         return None
@@ -1398,15 +1479,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                 update_deal(mapped_deal_id, loan_data, person_id, salesforce_loan_id)
                 # Update co-borrower association if we have one
                 if coborrower_person_id:
-                    from config import COBORROWER_NAME_KEY
-                    if COBORROWER_NAME_KEY:
-                        try:
-                            url = f"{BASE_URL}/deals/{mapped_deal_id}?api_token={PIPEDRIVE_API_KEY}"
-                            resp = requests.put(url, json={COBORROWER_NAME_KEY: coborrower_person_id})
-                            resp.raise_for_status()
-                            logger.info(f"Updated co-borrower association for Deal {mapped_deal_id}")
-                        except Exception as e:
-                            logger.warning(f"Failed to update co-borrower: {e}")
+                    add_deal_participant(mapped_deal_id, coborrower_person_id)
                 return mapped_deal_id
         except requests.exceptions.HTTPError as e:
             # If we get 404, the deal is likely archived (can't be fetched)
@@ -1444,15 +1517,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
         
         # Update co-borrower association if we have one
         if coborrower_person_id:
-            from config import COBORROWER_NAME_KEY
-            if COBORROWER_NAME_KEY:
-                try:
-                    url = f"{BASE_URL}/deals/{existing_deal_id}?api_token={PIPEDRIVE_API_KEY}"
-                    resp = requests.put(url, json={COBORROWER_NAME_KEY: coborrower_person_id})
-                    resp.raise_for_status()
-                    logger.info(f"Updated co-borrower association for Deal {existing_deal_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to update co-borrower: {e}")
+            add_deal_participant(existing_deal_id, coborrower_person_id)
         
         return existing_deal_id
     else:
@@ -1575,6 +1640,8 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
                                 
                                 logger.error(f"✓ Deal {deal_id} is active - UPDATING IT")
                                 update_deal(deal_id, loan_data, person_id, salesforce_loan_id)
+                                if coborrower_person_id:
+                                    add_deal_participant(deal_id, coborrower_person_id)
                                 return deal_id
                             except requests.exceptions.HTTPError as e:
                                 if e.response.status_code == 404:
@@ -1602,15 +1669,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
             
             # Update co-borrower association if we have one
             if coborrower_person_id:
-                from config import COBORROWER_NAME_KEY
-                if COBORROWER_NAME_KEY:
-                    try:
-                        url = f"{BASE_URL}/deals/{existing_deal_by_loan_number}?api_token={PIPEDRIVE_API_KEY}"
-                        resp = requests.put(url, json={COBORROWER_NAME_KEY: coborrower_person_id})
-                        resp.raise_for_status()
-                        logger.info(f"Updated co-borrower association for Deal {existing_deal_by_loan_number}")
-                    except Exception as e:
-                        logger.warning(f"Failed to update co-borrower: {e}")
+                add_deal_participant(existing_deal_by_loan_number, coborrower_person_id)
             
             return existing_deal_by_loan_number
         else:
@@ -1631,15 +1690,7 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
             
             # Update co-borrower association if we have one
             if coborrower_person_id:
-                from config import COBORROWER_NAME_KEY
-                if COBORROWER_NAME_KEY:
-                    try:
-                        url = f"{BASE_URL}/deals/{deal_id}?api_token={PIPEDRIVE_API_KEY}"
-                        resp = requests.put(url, json={COBORROWER_NAME_KEY: coborrower_person_id})
-                        resp.raise_for_status()
-                        logger.info(f"Added co-borrower association for Deal {deal_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to add co-borrower: {e}")
+                add_deal_participant(deal_id, coborrower_person_id)
             
             return deal_id
         else:
@@ -1656,14 +1707,6 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     
     # Update co-borrower association if we have one
     if deal_id and coborrower_person_id:
-        from config import COBORROWER_NAME_KEY
-        if COBORROWER_NAME_KEY:
-            try:
-                url = f"{BASE_URL}/deals/{deal_id}?api_token={PIPEDRIVE_API_KEY}"
-                resp = requests.put(url, json={COBORROWER_NAME_KEY: coborrower_person_id})
-                resp.raise_for_status()
-                logger.info(f"Added co-borrower association for Deal {deal_id}")
-            except Exception as e:
-                logger.warning(f"Failed to add co-borrower: {e}")
+        add_deal_participant(deal_id, coborrower_person_id)
     
     return deal_id
