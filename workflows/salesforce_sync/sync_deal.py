@@ -358,6 +358,67 @@ def find_active_lead_for_person(person_id: int) -> Optional[str]:
         return None
 
 
+def find_active_lead_by_name(first_name: str) -> Optional[str]:
+    """
+    Fallback: find an active lead by borrower first name in the title.
+    Used when the lead was created without a person_id attached.
+    
+    Jake's naming convention: "[First] - [Referral] Lead" or "[First Last] Lead"
+    We search all active leads and match on title starting with the first name.
+    """
+    if not first_name:
+        return None
+
+    url = f"{BASE_URL}/leads"
+    params = {
+        "api_token": PIPEDRIVE_API_KEY,
+        "archived_status": "not_archived",
+        "limit": 100
+    }
+
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        result = resp.json()
+
+        data = result.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("items", [])
+
+        if not data:
+            return None
+
+        first_lower = first_name.strip().lower()
+
+        for lead in data:
+            lead_id = lead.get("id")
+            title = (lead.get("title") or "").lower()
+
+            # Skip cancelled labels
+            label = lead.get("label")
+            label_name = None
+            if isinstance(label, dict):
+                label_name = label.get("name")
+            elif isinstance(label, list) and label:
+                first_label = label[0]
+                label_name = first_label.get("name") if isinstance(first_label, dict) else str(first_label)
+            elif isinstance(label, str):
+                label_name = label
+            if label_name and label_name.lower() == "cancelled":
+                continue
+
+            # Match: title starts with first name (e.g. "cody - laura lead" or "cody bartos lead")
+            if title.startswith(first_lower):
+                logger.info(f"Found active Lead {lead_id} by name match '{first_name}' in title '{lead.get('title')}'")
+                return str(lead_id)
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Error searching for lead by name: {e}")
+        return None
+
+
 def convert_lead_to_deal(lead_id: str, loan_data: Dict, person_id: int) -> Optional[int]:
     """
     Convert a Lead to a Deal using Pipedrive's conversion API.
@@ -1678,7 +1739,29 @@ def sync_deal_from_loan(loan_data: Dict) -> Optional[int]:
     # Step 3: No existing deal found - check for active Lead to convert
     logger.info(f"Step 3: Checking for active Lead for Person {person_id}")
     active_lead_id = find_active_lead_for_person(person_id)
-    
+
+    # Fallback: if no lead found by person_id (lead may not have a person linked),
+    # try searching by borrower first name using Jake's naming convention:
+    # "[First] - [Referral] Lead" or "[First Last] Lead"
+    if not active_lead_id:
+        borrower_rel = loan_data.get("MtgPlanner_CRM__Borrower_Name__r", {})
+        borrower_full = borrower_rel.get("Name", "") if isinstance(borrower_rel, dict) else ""
+        borrower_first = borrower_full.split()[0] if borrower_full else ""
+        if borrower_first:
+            logger.info(f"Step 3b: No lead by person_id - trying name fallback for '{borrower_first}'")
+            active_lead_id = find_active_lead_by_name(borrower_first)
+            if active_lead_id:
+                # Link the person to this lead before converting
+                try:
+                    link_resp = requests.patch(
+                        f"{BASE_URL}/leads/{active_lead_id}",
+                        params={"api_token": PIPEDRIVE_API_KEY},
+                        json={"person_id": person_id}
+                    )
+                    logger.info(f"Step 3b: Linked Person {person_id} to Lead {active_lead_id}: {link_resp.status_code}")
+                except Exception as e:
+                    logger.warning(f"Step 3b: Could not link person to lead: {e}")
+
     if active_lead_id:
         logger.info(f"Step 3: Found active Lead {active_lead_id} - converting to Deal")
         deal_id = convert_lead_to_deal(active_lead_id, loan_data, person_id)
