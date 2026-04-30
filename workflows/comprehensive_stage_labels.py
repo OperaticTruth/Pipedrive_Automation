@@ -21,7 +21,11 @@ def get_person_labels(person_id):
     url = f"{BASE_URL}/persons/{person_id}?api_token={PIPEDRIVE_API_KEY}"
     resp = requests.get(url)
     data = resp.json().get("data", {})
-    raw = data.get("custom_fields", {}).get(CONTACT_LABEL_KEY)
+    # Pipedrive custom fields are returned at the root level on person payloads.
+    # Fall back to nested custom_fields just in case older payload shapes appear.
+    raw = data.get(CONTACT_LABEL_KEY)
+    if raw is None:
+        raw = data.get("custom_fields", {}).get(CONTACT_LABEL_KEY)
     if not raw:
         return []
     # Pipedrive may return a comma-separated string or a list
@@ -153,4 +157,4 @@ def comprehensive_stage_labels(payload):
     if coborrower_id:
         apply_labels_to_person(coborrower_id, new_label, preserve_closed_client)
     
-    print(f"[✓] Completed label updates for Deal {deal_id}") 
+    print(f"[✓] Completed label updates for Deal {deal_id}")
